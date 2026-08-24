@@ -1,0 +1,14 @@
+[project]
+name = "aset-worker"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "airflow-base",
+    "pandas",
+    "pyarrow",
+    "gspread",
+    "oauth2client"
+]
+
+[tool.uv.sources]
+airflow-base = { workspace = true }

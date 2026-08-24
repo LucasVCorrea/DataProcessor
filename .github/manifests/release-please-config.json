@@ -1,0 +1,28 @@
+{
+    "release-type": "python",
+    "include-v-in-tag": true,
+    "include-component-in-tag": true,
+    "separate-pull-requests": true,
+    "packages": {
+        "airflow_base": {
+            "package-name": "airflow",
+            "extra-files": [
+                {
+                    "type": "toml",
+                    "path": "uv.lock",
+                    "jsonpath": "$.package[?(@.name.value=='airflow')].version"
+                }
+            ]
+        },
+        "workers/aset-worker": {
+            "package-name": "aset-worker",
+            "extra-files": [
+                {
+                    "type": "toml",
+                    "path": "uv.lock",
+                    "jsonpath": "$.package[?(@.name.value=='aset-worker')].version"
+                }
+            ]
+        }
+    }
+}

@@ -1,0 +1,39 @@
+name: CICD
+
+on:
+  pull_request:
+    branches: 
+      - main
+    types:
+      - opened #For when the PR was opened
+      - edited #For when the PR title was edited
+      - ready_for_review #I think it has something to do with drafts and it's required
+      - synchronize #For when we push a new commit to the PR
+      - reopened #For then the PR was reopened 
+      - labeled #For when a label is added to the PR. This is mostly for release-please created PRs and the fact that default tokens can't trigger sub workflows
+
+  #We also run this on push to main to make sure no changes in the base branch
+  #caused any test to fail
+  push:
+    branches:
+      - main
+
+jobs:
+
+  gate:
+
+    runs-on: unlam
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: bootstrap
+        id: bootstrap
+        uses: Asterius-Dev/CICD/actions/bootstrap@main
+        with:
+          discord_webhook_url: ${{ secrets.RELEASES_WEBHOOK_URL }}
+          gh_app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          secrets_json: ${{ toJson(secrets) }}

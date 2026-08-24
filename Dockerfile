@@ -1,4 +1,4 @@
-FROM astral/uv:python3.14-alpine AS base
+FROM astral/uv:python3.14-alpine AS airflow_base
 LABEL maintainer="Xero-Hige <Gaston.martinez.90@gmail.com>"
 
 # Set uv environment variables for performance
@@ -9,16 +9,21 @@ ENV UV_LINK_MODE=copy
 COPY pyproject.toml uv.lock /opt/
 
 # Copy source files
-COPY projects/base_project /opt/projects/base_project
+COPY airflow_base /opt/airflow_base
 
 # Install dependencies to /opt/venv (outside the source mount path)
 WORKDIR /opt
-RUN uv sync --no-install-project --no-dev
+RUN uv sync --frozen --package airflow-base
 
-FROM base AS project_a
+ENTRYPOINT ["uv", "run", "--package","airflow-base","airflow"]
 
-COPY projects/project_a /opt/projects/project_a
+FROM airflow_base AS worker
 
-RUN uv sync --no-install-project --no-dev
+ARG WORKER_NAME=aset-worker
 
-ENTRYPOINT ["uv", "run", "--package","project_a","start"]
+COPY workers/${WORKER_NAME} /opt/workers/${WORKER_NAME}
+
+ENV WORKER_NAME=$WORKER_NAME
+RUN uv sync --frozen --package ${WORKER_NAME}
+
+ENTRYPOINT ["sh","-c", "uv run --package $WORKER_NAME airflow \"$@\"", "--"]

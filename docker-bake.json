@@ -1,0 +1,31 @@
+{
+  "variable": {
+    "TAG": {
+      "default": "latest"
+    }
+  },
+  "group": {
+    "default": {
+      "targets": ["airflow", "aset-worker"]
+    }
+  },
+
+  "target": {
+    "airflow": {
+      "context": ".",
+      "dockerfile": "Dockerfile",
+      "target": "airflow_base",
+      "tags": ["airflow:${TAG}"]
+    },
+
+    "aset-worker": {
+      "context": ".",
+      "dockerfile": "Dockerfile",
+      "target": "worker",
+      "args": {
+        "WORKER_NAME": "aset-worker"
+      },
+      "tags": ["aset-worker:${TAG}"]
+    }
+  }
+}

@@ -1,0 +1,15 @@
+packages:
+  airflow_base:
+    name: airflow
+    buildx:
+      image_name: airflow
+      bake_file: docker-bake.json
+  workers/aset-worker:
+    name: aset-worker
+    lint:
+      script: ls
+      bypass: true
+    buildx:
+      image_name: aset-worker
+      bake_file: docker-bake.json
+    

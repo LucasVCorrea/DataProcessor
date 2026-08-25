@@ -10,7 +10,9 @@ resolution-markers = [
 [manifest]
 members = [
     "airflow-base",
-    "aset-worker",
+    "airflow-google-worker",
+    "aset-berisso-worker",
+    "asterius-dataloader-worker",
 ]
 
 [[package]]
@@ -62,6 +64,27 @@ requires-dist = [
     { name = "apache-airflow-providers-fab" },
     { name = "asyncpg" },
     { name = "psycopg2-binary" },
+]
+
+[[package]]
+name = "airflow-google-worker"
+version = "0.1.0"
+source = { editable = "base_workers/google-worker" }
+dependencies = [
+    { name = "airflow-base" },
+    { name = "gspread" },
+    { name = "oauth2client" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "airflow-base", editable = "airflow_base" },
+    { name = "gspread" },
+    { name = "oauth2client" },
+    { name = "pandas" },
+    { name = "pyarrow" },
 ]
 
 [[package]]
@@ -397,25 +420,15 @@ wheels = [
 ]
 
 [[package]]
-name = "aset-worker"
+name = "aset-berisso-worker"
 version = "0.1.0"
-source = { virtual = "workers/aset-worker" }
+source = { virtual = "projects/aset/berisso" }
 dependencies = [
-    { name = "airflow-base" },
-    { name = "gspread" },
-    { name = "oauth2client" },
-    { name = "pandas" },
-    { name = "pyarrow" },
+    { name = "airflow-google-worker" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "airflow-base", editable = "airflow_base" },
-    { name = "gspread" },
-    { name = "oauth2client" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-]
+requires-dist = [{ name = "airflow-google-worker", editable = "base_workers/google-worker" }]
 
 [[package]]
 name = "asgiref"
@@ -425,6 +438,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/e6/26/3b59f2bdae5f64038
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c0/1b/54f4ad77cd8a584fa70746c47df988e002cf1ee1eba43364d46f87803647/asgiref-3.12.1-py3-none-any.whl", hash = "sha256:fe386d1c2bff7259ea95929266d12a8cf9a8b5a1c2598402967d8792e7a7c094", size = 25478, upload-time = "2026-07-14T09:56:16.926Z" },
 ]
+
+[[package]]
+name = "asterius-dataloader-worker"
+version = "0.1.0"
+source = { virtual = "projects/asterius/dataLoader" }
+dependencies = [
+    { name = "airflow-google-worker" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "airflow-google-worker", editable = "base_workers/google-worker" }]
 
 [[package]]
 name = "asyncpg"

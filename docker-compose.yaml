@@ -216,7 +216,7 @@ services:
       - airflow-init
 
   airflow-worker:
-    image: aset-worker:latest
+    image: g-worker-base:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}

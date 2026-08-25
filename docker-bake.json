@@ -4,9 +4,11 @@
       "default": "latest"
     }
   },
+
   "group": {
     "default": {
-      "targets": ["airflow", "aset-worker"]
+      "targets": ["airflow",
+                  "airflow-google-worker"]
     }
   },
 
@@ -15,17 +17,14 @@
       "context": ".",
       "dockerfile": "Dockerfile",
       "target": "airflow_base",
-      "tags": ["airflow:${TAG}"]
+      "tags": ["airDP/airflow:${TAG}"]
     },
 
-    "aset-worker": {
+    "airflow-google-worker": {
       "context": ".",
       "dockerfile": "Dockerfile",
-      "target": "worker",
-      "args": {
-        "WORKER_NAME": "aset-worker"
-      },
-      "tags": ["aset-worker:${TAG}"]
+      "target": "g-worker-base",
+      "tags": ["airDP/google-worker:${TAG}"]
     }
   }
 }

@@ -1,5 +1,6 @@
 [tool.uv.workspace]
 members = [
     "airflow_base",
-    "workers/*"
+    "projects/aset/*",
+    "projects/asterius/*"
 ]

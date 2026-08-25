@@ -19,11 +19,37 @@ ENTRYPOINT ["uv", "run", "--package","airflow-base","airflow"]
 
 FROM airflow_base AS worker
 
-ARG WORKER_NAME=aset-worker
+ARG WORKER_NAME=worker
 
-COPY workers/${WORKER_NAME} /opt/workers/${WORKER_NAME}
+COPY projects/${PROJECT_NAME}/${PIPELINE_NAME}/pyproject.toml /opt/projects/${PROJECT_NAME}/${PIPELINE_NAME}/pyproject.toml
 
-ENV WORKER_NAME=$WORKER_NAME
-RUN uv sync --frozen --package ${WORKER_NAME}
+WORKDIR /opt/projects/${PROJECT_NAME}/${PIPELINE_NAME}
+RUN uv sync --frozen --project .
 
-ENTRYPOINT ["sh","-c", "uv run --package $WORKER_NAME airflow \"$@\"", "--"]
+ENTRYPOINT ["uv","run","--project",".","airflow"]
+
+#Specific workers
+
+FROM airflow_base AS g-worker-base
+
+COPY base_workers/google-worker /opt/base_workers/google-worker
+
+WORKDIR /opt/base_workers/google-worker
+
+RUN uv sync --frozen --project .
+
+ENTRYPOINT ["uv","run","--project",".","airflow"]
+
+
+FROM g-worker-base AS g-worker
+
+ARG WORKER_NAME=g-worker
+
+COPY projects/${PROJECT_NAME}/${PIPELINE_NAME}/pyproject.toml /opt/projects/${PROJECT_NAME}/${PIPELINE_NAME}/pyproject.toml
+
+WORKDIR /opt/projects/${PROJECT_NAME}/${PIPELINE_NAME}
+RUN uv sync --frozen --project .
+
+ENTRYPOINT ["uv","run","--project",".","airflow"]
+
+#---------------------------------------------

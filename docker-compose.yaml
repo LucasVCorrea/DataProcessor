@@ -72,7 +72,7 @@ services:
     restart: always
 
   airflow-apiserver:
-    image: airflow/latest
+    image: airDP/airflow:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}
@@ -121,7 +121,7 @@ services:
       - airflow-init
 
   airflow-scheduler:
-    image: airflow/latest
+    image: airDP/airflow:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}
@@ -169,7 +169,7 @@ services:
 
 
   airflow-dag-processor:
-    image: airflow/latest
+    image: airDP/airflow:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}
@@ -216,7 +216,7 @@ services:
       - airflow-init
 
   airflow-worker:
-    image: g-worker-base:latest
+    image: airDP/google-worker:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}
@@ -248,7 +248,9 @@ services:
       - airflowlogs:/opt/airflow/logs
       - airflowconfig:/opt/airflow/config
       - airflowplugins:/opt/airflow/plugins
-      - workersData:/data
+      - berissoData:/data/berisso
+      - berissoTmpData:/tmp/data/berisso
+      - credentials:/credentials
     user: "0:0"
     command: ["celery","worker"]
 #    healthcheck:
@@ -266,7 +268,7 @@ services:
       - airflow-apiserver
 
   airflow-triggerer:
-    image: airflow/latest
+    image: airDP/airflow:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}
@@ -314,7 +316,7 @@ services:
 
 
   airflow-init:
-    image: airflow/latest
+    image: airDP/airflow:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}
@@ -540,4 +542,6 @@ volumes:
   airflowconfig:
   uvcache:
   workersData:
-
+  berissoData:
+  berissoTmpData:
+  credentials:

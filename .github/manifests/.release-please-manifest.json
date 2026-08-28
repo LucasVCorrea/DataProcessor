@@ -1,4 +1,4 @@
 {
   "airflow": "0.0.1",
-  "aset-worker": "0.0.1"
+  "google-worker": "0.0.1"
 }

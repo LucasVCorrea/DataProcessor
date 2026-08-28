@@ -4,12 +4,12 @@ packages:
     buildx:
       image_name: airflow
       bake_file: docker-bake.json
-  workers/aset-worker:
-    name: aset-worker
+  base_workers/google-worker:
+    name: google-worker
     lint:
       script: ls
       bypass: true
     buildx:
-      image_name: aset-worker
+      image_name: airflow-google-worker
       bake_file: docker-bake.json
     

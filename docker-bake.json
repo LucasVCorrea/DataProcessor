@@ -17,14 +17,16 @@
       "context": ".",
       "dockerfile": "Dockerfile",
       "target": "airflow_base",
-      "tags": ["airDP/airflow:${TAG}"]
+      "tags": ["airDP/airflow:${TAG}",
+               "airDP/airflow:latest"]
     },
 
     "airflow-google-worker": {
       "context": ".",
       "dockerfile": "Dockerfile",
       "target": "g-worker-base",
-      "tags": ["airDP/google-worker:${TAG}"]
+      "tags": ["airDP/google-worker:${TAG}",
+               "airDP/google-worker:latest"]
     }
   }
 }

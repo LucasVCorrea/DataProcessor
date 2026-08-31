@@ -424,11 +424,21 @@ name = "aset-berisso-worker"
 version = "0.1.0"
 source = { virtual = "projects/aset/berisso" }
 dependencies = [
-    { name = "airflow-google-worker" },
+    { name = "gspread" },
+    { name = "numpy" },
+    { name = "oauth2client" },
+    { name = "pandas" },
+    { name = "pyarrow" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "airflow-google-worker", editable = "base_workers/google-worker" }]
+requires-dist = [
+    { name = "gspread" },
+    { name = "numpy" },
+    { name = "oauth2client" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+]
 
 [[package]]
 name = "asgiref"

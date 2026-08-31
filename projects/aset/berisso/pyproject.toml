@@ -3,8 +3,9 @@ name = "aset-berisso-worker"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    "airflow-google-worker"
+    "gspread",
+    "numpy",
+    "oauth2client",
+    "pandas",
+    "pyarrow",
 ]
-
-[tool.uv.sources]
-airflow-google-worker = { workspace = true }

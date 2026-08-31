@@ -1,0 +1,53 @@
+fetch_actas_pagadas > transform_payments
+fetch_actas_enviadas > transform_generated_notifications
+fetch_actas_notificadas > transform_notifications_door
+fetch_actas_notificadas_email > transform_notifications_email
+fetch_actividad_revisores > transform_nivel5
+fetch_fallos > transform_fallos
+fetch_detalles_infracciones > transform_detalles_infracciones
+fetch_actas_cantidad > transform_actas_cantidad
+transform_actas_cantidad > join_infraction_data
+transform_detalles_infracciones > join_infraction_data
+
+transform_notifications_door > join_notifications
+transform_notifications_email > join_notifications
+join_notifications > join_notifications_payments
+transform_payments > join_notifications_payments
+
+transform_payments > build_payments_detail
+transform_generated_notifications > build_generated_notifications_detail
+transform_fallos > build_fallos_detail
+transform_nivel5 > build_nivel5_detail
+join_notifications > build_notifications_detail
+join_notifications_payments > build_notification_payments_detail
+
+transform_payments > build_dashboard_payments_daily
+transform_payments > build_dashboard_monthly_metrics
+transform_generated_notifications > build_dashboard_monthly_metrics
+
+transform_payments > build_payments_by_method_daily
+transform_payments > build_payments_daily
+transform_payments > build_payments_monthly
+
+join_notifications > build_notifications_by_date_type
+join_notifications > build_notifications_by_type_month
+join_notifications_payments > build_lotes_daily_analytics
+join_notifications_payments > build_lotes_monthly_analytics
+
+transform_fallos > build_fallos_daily_juzgado
+transform_fallos > build_fallos_daily_tipo
+transform_fallos > build_fallos_tipo_total
+
+transform_nivel5 > build_nivel5_daily_reviewer
+transform_nivel5 > build_nivel5_daily_camera
+transform_nivel5 > build_nivel5_daily_result_detail
+build_nivel5_daily_result_detail > build_nivel5_daily_result
+transform_nivel5 > build_nivel5_daily_metrics
+transform_actas_cantidad > build_infraction_counts
+join_infraction_data > build_camera_detail
+transform_actas_cantidad > build_dashboard_infractions_by_type
+join_infraction_data > build_dashboard_generated_by_type
+join_infraction_data > build_dashboard_monthly_metrics
+join_infraction_data > build_camera_by_month_type
+join_infraction_data > build_camera_by_month_total
+join_infraction_data > build_camera_map

@@ -32,8 +32,10 @@ def fetch_actas_pagadas(**kwargs):
     )
     client = gspread.authorize(credentials)
     worksheet = client.open("actas_pagadas").sheet1
-    values = worksheet.get_all_values()
+    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
     dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
+    if not dataframe.empty:
+        dataframe = dataframe.astype("string")
     dataframe.to_parquet(ACTAS_PAGADAS_RAW, index=False)
 
 def transform_payments(**kwargs):

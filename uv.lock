@@ -12,6 +12,7 @@ members = [
     "airflow-base",
     "airflow-google-worker",
     "aset-berisso-worker",
+    "aset-transito-worker",
     "asterius-dataloader-worker",
 ]
 
@@ -435,6 +436,25 @@ dependencies = [
 requires-dist = [
     { name = "gspread" },
     { name = "numpy" },
+    { name = "oauth2client" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+]
+
+[[package]]
+name = "aset-transito-worker"
+version = "0.1.0"
+source = { virtual = "projects/aset/transito" }
+dependencies = [
+    { name = "gspread" },
+    { name = "oauth2client" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gspread" },
     { name = "oauth2client" },
     { name = "pandas" },
     { name = "pyarrow" },

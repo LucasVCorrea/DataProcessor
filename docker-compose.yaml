@@ -250,6 +250,8 @@ services:
       - airflowplugins:/opt/airflow/plugins
       - berissoData:/data/berisso
       - berissoTmpData:/tmp/data/berisso
+      - transitoData:/data/transito
+      - transitoTmpData:/tmp/data/transito
       - credentials:/credentials
     user: "0:0"
     command: ["celery","worker"]
@@ -544,4 +546,6 @@ volumes:
   workersData:
   berissoData:
   berissoTmpData:
+  transitoData:
+  transitoTmpData:
   credentials:

@@ -245,6 +245,92 @@ transform_actividad_revisores_task = PythonOperator(
 fetch_actividad_revisores_task >> transform_actividad_revisores_task
 
 
+# ---- valores UF -----------------------------------------------------------
+
+VALORES_UF_RAW = "/tmp/data/transito/valores_uf.parquet"
+VALORES_UF_CLEAN = "/tmp/data/transito/valores_uf_clean.parquet"
+
+
+def fetch_valores_uf(**kwargs):
+    import gspread
+    import pandas as pd
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_name(
+        "/credentials/credentials.json",
+        [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+    client = gspread.authorize(credentials)
+    worksheet = client.open("valores_uf").sheet1
+    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
+    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
+    if not dataframe.empty:
+        dataframe = dataframe.astype("string")
+    dataframe.to_parquet(VALORES_UF_RAW, index=False)
+
+
+def transform_valores_uf(**kwargs):
+    import pandas as pd
+
+    dataframe = pd.read_parquet(VALORES_UF_RAW)
+    dataframe.columns = dataframe.columns.str.strip()
+
+    required_columns = {"Año", "Mes", "Valor UF"}
+    missing_columns = required_columns.difference(dataframe.columns)
+    if missing_columns:
+        raise ValueError(
+            "valores_uf no contiene las columnas requeridas: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    dataframe["Año"] = pd.to_numeric(
+        dataframe["Año"].astype("string").str.strip(),
+        errors="coerce",
+    ).astype("Int64")
+    dataframe["Mes"] = (
+        dataframe["Mes"].astype("string").str.strip().str.capitalize()
+    )
+
+    values = dataframe["Valor UF"].astype("string").str.strip()
+    numeric_values = pd.to_numeric(values, errors="coerce")
+    formatted_values = (
+        values.str.replace("$", "", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+    dataframe["Valor UF"] = numeric_values.fillna(
+        pd.to_numeric(formatted_values, errors="coerce")
+    )
+
+    dataframe = dataframe.loc[
+        dataframe["Año"].notna()
+        & dataframe["Mes"].ne("")
+        & dataframe["Valor UF"].notna()
+    ]
+    dataframe["Año"] = dataframe["Año"].astype("int64")
+    dataframe.drop_duplicates(subset=["Año", "Mes"], keep="last").to_parquet(
+        VALORES_UF_CLEAN,
+        index=False,
+    )
+
+
+fetch_valores_uf_task = PythonOperator(
+    task_id="fetch_valores_uf",
+    python_callable=fetch_valores_uf,
+    dag=transito_dag,
+)
+transform_valores_uf_task = PythonOperator(
+    task_id="transform_valores_uf",
+    python_callable=transform_valores_uf,
+    dag=transito_dag,
+)
+fetch_valores_uf_task >> transform_valores_uf_task
+
+
 # ---- motivos de rechazo ---------------------------------------------------
 
 MOTIVOS_RECHAZOS_RAW = "/tmp/data/transito/motivos_rechazos.parquet"
@@ -612,7 +698,23 @@ fetch_tiempo_revision_task >> transform_tiempo_revision_task
 
 # ---- joins ----------------------------------------------------------------
 
+ACTIVITY_UF_CLEAN = "/tmp/data/transito/activity_uf_clean.parquet"
 REVIEWER_HOURLY_CLEAN = "/tmp/data/transito/reviewer_hourly_clean.parquet"
+
+
+def join_activity_uf(**kwargs):
+    import pandas as pd
+
+    activity = pd.read_parquet(ACTIVIDAD_REVISORES_CLEAN)
+    uf_values = pd.read_parquet(VALORES_UF_CLEAN)[["Año", "Mes", "Valor UF"]]
+    activity.merge(
+        uf_values,
+        on=["Año", "Mes"],
+        how="left",
+    ).to_parquet(
+        ACTIVITY_UF_CLEAN,
+        index=False,
+    )
 
 
 def join_activity_review_time(**kwargs):
@@ -659,11 +761,18 @@ def join_activity_review_time(**kwargs):
     dataframe.to_parquet(REVIEWER_HOURLY_CLEAN, index=False)
 
 
+join_activity_uf_task = PythonOperator(
+    task_id="join_activity_uf",
+    python_callable=join_activity_uf,
+    dag=transito_dag,
+)
 join_activity_review_time_task = PythonOperator(
     task_id="join_activity_review_time",
     python_callable=join_activity_review_time,
     dag=transito_dag,
 )
+transform_actividad_revisores_task >> join_activity_uf_task
+transform_valores_uf_task >> join_activity_uf_task
 transform_actividad_revisores_task >> join_activity_review_time_task
 transform_tiempo_revision_task >> join_activity_review_time_task
 
@@ -674,7 +783,7 @@ transform_tiempo_revision_task >> join_activity_review_time_task
 def build_activity_reviewers_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(ACTIVIDAD_REVISORES_CLEAN).to_parquet(
+    pd.read_parquet(ACTIVITY_UF_CLEAN).to_parquet(
         "/data/transito/activity_reviewers_detail.parquet",
         index=False,
     )
@@ -745,7 +854,7 @@ build_reviewer_hourly_detail_task = PythonOperator(
     dag=transito_dag,
 )
 
-transform_actividad_revisores_task >> build_activity_reviewers_detail_task
+join_activity_uf_task >> build_activity_reviewers_detail_task
 transform_motivos_rechazos_task >> build_rejection_reasons_detail_task
 transform_tiempo_revision_task >> build_review_time_detail_task
 join_activity_review_time_task >> build_reviewer_hourly_detail_task

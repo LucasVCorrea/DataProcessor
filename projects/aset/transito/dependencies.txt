@@ -2,6 +2,7 @@ fetch_actividad_revisores > transform_actividad_revisores
 fetch_valores_uf > transform_valores_uf
 fetch_motivos_rechazos > transform_motivos_rechazos
 fetch_tiempo_revision > transform_tiempo_revision
+fetch_imagenes_pendientes > transform_imagenes_pendientes
 transform_actividad_revisores > join_activity_uf
 transform_valores_uf > join_activity_uf
 transform_actividad_revisores > join_activity_review_time
@@ -9,4 +10,5 @@ transform_tiempo_revision > join_activity_review_time
 join_activity_uf > build_activity_reviewers_detail
 transform_motivos_rechazos > build_rejection_reasons_detail
 transform_tiempo_revision > build_review_time_detail
+transform_imagenes_pendientes > build_pending_images_detail
 join_activity_review_time > build_reviewer_hourly_detail

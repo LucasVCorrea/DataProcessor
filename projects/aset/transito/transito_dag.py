@@ -696,6 +696,90 @@ transform_tiempo_revision_task = PythonOperator(
 fetch_tiempo_revision_task >> transform_tiempo_revision_task
 
 
+# ---- imagenes pendientes --------------------------------------------------
+
+IMAGENES_PENDIENTES_RAW = "/tmp/data/transito/imagenes_pendientes.parquet"
+IMAGENES_PENDIENTES_CLEAN = "/tmp/data/transito/imagenes_pendientes_clean.parquet"
+
+
+def fetch_imagenes_pendientes(**kwargs):
+    import gspread
+    import pandas as pd
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_name(
+        "/credentials/credentials.json",
+        [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+    client = gspread.authorize(credentials)
+    worksheet = client.open("imagenes_pendientes").sheet1
+    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
+    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
+    if not dataframe.empty:
+        dataframe = dataframe.astype("string")
+    dataframe.to_parquet(IMAGENES_PENDIENTES_RAW, index=False)
+
+
+def transform_imagenes_pendientes(**kwargs):
+    import pandas as pd
+
+    dataframe = pd.read_parquet(IMAGENES_PENDIENTES_RAW).rename(
+        columns={"client": "Cliente", "status": "Estado", "count": "Cantidad"}
+    )
+    required_columns = {"Cliente", "Estado", "Cantidad", "tipo"}
+    missing_columns = required_columns.difference(dataframe.columns)
+    if missing_columns:
+        raise ValueError(
+            "imagenes_pendientes no contiene las columnas requeridas: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    dataframe["Cliente"] = (
+        dataframe["Cliente"].astype("string").fillna("").str.strip().str.capitalize()
+    )
+    dataframe["Estado"] = (
+        dataframe["Estado"].astype("string").fillna("").str.strip().str.capitalize()
+    )
+    dataframe["tipo"] = (
+        dataframe["tipo"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.replace(r"^\[\d+\]\s*", "", regex=True)
+    )
+    cantidad = dataframe["Cantidad"].astype("string").str.strip()
+    cantidad_numerica = pd.to_numeric(cantidad, errors="coerce")
+    cantidad_formateada = (
+        cantidad.str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+    dataframe["Cantidad"] = (
+        cantidad_numerica.fillna(
+            pd.to_numeric(cantidad_formateada, errors="coerce")
+        )
+        .fillna(0)
+        .round()
+        .astype("int64")
+    )
+    dataframe.drop_duplicates().to_parquet(IMAGENES_PENDIENTES_CLEAN, index=False)
+
+
+fetch_imagenes_pendientes_task = PythonOperator(
+    task_id="fetch_imagenes_pendientes",
+    python_callable=fetch_imagenes_pendientes,
+    dag=transito_dag,
+)
+transform_imagenes_pendientes_task = PythonOperator(
+    task_id="transform_imagenes_pendientes",
+    python_callable=transform_imagenes_pendientes,
+    dag=transito_dag,
+)
+fetch_imagenes_pendientes_task >> transform_imagenes_pendientes_task
+
+
 # ---- joins ----------------------------------------------------------------
 
 ACTIVITY_UF_CLEAN = "/tmp/data/transito/activity_uf_clean.parquet"
@@ -807,6 +891,15 @@ def build_review_time_detail(**kwargs):
     )
 
 
+def build_pending_images_detail(**kwargs):
+    import pandas as pd
+
+    pd.read_parquet(IMAGENES_PENDIENTES_CLEAN).to_parquet(
+        "/data/transito/pending_images_detail.parquet",
+        index=False,
+    )
+
+
 def build_reviewer_hourly_detail(**kwargs):
     import pandas as pd
 
@@ -848,6 +941,11 @@ build_review_time_detail_task = PythonOperator(
     python_callable=build_review_time_detail,
     dag=transito_dag,
 )
+build_pending_images_detail_task = PythonOperator(
+    task_id="build_pending_images_detail",
+    python_callable=build_pending_images_detail,
+    dag=transito_dag,
+)
 build_reviewer_hourly_detail_task = PythonOperator(
     task_id="build_reviewer_hourly_detail",
     python_callable=build_reviewer_hourly_detail,
@@ -857,4 +955,5 @@ build_reviewer_hourly_detail_task = PythonOperator(
 join_activity_uf_task >> build_activity_reviewers_detail_task
 transform_motivos_rechazos_task >> build_rejection_reasons_detail_task
 transform_tiempo_revision_task >> build_review_time_detail_task
+transform_imagenes_pendientes_task >> build_pending_images_detail_task
 join_activity_review_time_task >> build_reviewer_hourly_detail_task

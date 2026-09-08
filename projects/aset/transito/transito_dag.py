@@ -180,10 +180,10 @@ def transform_actividad_revisores(**kwargs):
     dataframe["Rechazadas"] = dataframe["Rechazadas"].fillna(0)
     dataframe["Total"] = dataframe["Total"].fillna(dataframe["Aceptadas"] + dataframe["Rechazadas"])
 
-    january_2025_reviewers = dataframe.loc[
-        (dataframe["Mes"] == "Enero") & (dataframe["Año"] == 2025), "Auditor"
+    january_reviewers = dataframe.loc[
+        dataframe["Mes"] == "Enero", "Auditor"
     ].unique().tolist()
-    unlam_reviewers = january_2025_reviewers + [
+    unlam_reviewers = january_reviewers + [
         "Miguel Gullo",
         "Celeste Donato",
         "Ramiro Odella",
@@ -195,7 +195,7 @@ def transform_actividad_revisores(**kwargs):
         "Santiago Reyes",
         "Sofia Brites",
         "Nicolas Azuaga",
-        "Mabel García",
+        "Mabel Garcia",
         "Mariana Maggiolino",
     ]
     dataframe["dominio"] = dataframe["Auditor"].isin(unlam_reviewers).map({True: "Unlam", False: "Otro"})
@@ -509,7 +509,7 @@ def transform_motivos_rechazos(**kwargs):
         "Nicolas Azuaga",
         "Cecilia Solares",
         "Santiago Reyes",
-        "Mabel García",
+        "Mabel Garcia",
         "Mariana Maggiolino",
     ]
 
@@ -605,6 +605,7 @@ def transform_tiempo_revision(**kwargs):
     dataframe["Municipio"] = (
         dataframe["Municipio"].astype("string").fillna("").str.strip().str.capitalize()
     )
+    dataframe["Municipio"] = dataframe["Municipio"].replace({"Ezeiza_ftl": "Ezeiza"})
 
     dataframe["Tipo de Revisión"] = (
         dataframe["Tipo de Revisión"].astype("string").fillna("").str.strip()

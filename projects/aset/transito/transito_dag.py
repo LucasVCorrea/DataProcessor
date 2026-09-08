@@ -180,10 +180,13 @@ def transform_actividad_revisores(**kwargs):
     dataframe["Rechazadas"] = dataframe["Rechazadas"].fillna(0)
     dataframe["Total"] = dataframe["Total"].fillna(dataframe["Aceptadas"] + dataframe["Rechazadas"])
 
-    january_reviewers = dataframe.loc[
-        dataframe["Mes"] == "Enero", "Auditor"
+    # El dominio UNLaM conserva la referencia histórica original del dashboard:
+    # auditores activos en enero de 2025 más las incorporaciones posteriores.
+    # Usar cualquier enero mezcla auditores pertenecientes a otros dominios.
+    january_2025_reviewers = dataframe.loc[
+        (dataframe["Mes"] == "Enero") & (dataframe["Año"] == 2025), "Auditor"
     ].unique().tolist()
-    unlam_reviewers = january_reviewers + [
+    unlam_reviewers = january_2025_reviewers + [
         "Miguel Gullo",
         "Celeste Donato",
         "Ramiro Odella",
@@ -496,22 +499,10 @@ def transform_motivos_rechazos(**kwargs):
         errors="coerce",
     ).fillna(0)
 
-    january_reviewers = dataframe.loc[dataframe["Mes"] == "Enero", "Auditor"].unique().tolist()
-    unlam_reviewers = january_reviewers + [
-        "Miguel Gullo",
-        "Celeste Donato",
-        "Ramiro Odella",
-        "Yanina Denise Ybarra",
-        "Jeronimo Blanco",
-        "Mariana Diaz",
-        "Mariana Becerra",
-        "Sofia Brites",
-        "Nicolas Azuaga",
-        "Cecilia Solares",
-        "Santiago Reyes",
-        "Mabel Garcia",
-        "Mariana Maggiolino",
-    ]
+    # Motivos de rechazo usa exactamente el mismo dominio ya validado por
+    # actividad de revisores, evitando mantener una segunda regla distinta.
+    activity_reviewers = pd.read_parquet(ACTIVIDAD_REVISORES_CLEAN)
+    unlam_reviewers = set(activity_reviewers["Auditor"].dropna().astype(str).unique())
 
     dataframe = dataframe.loc[
         dataframe["Tipo de Cámara"].isin(["Semáforo", "Luces", "Buscador de patentes"])
@@ -552,6 +543,7 @@ transform_motivos_rechazos_task = PythonOperator(
     dag=transito_dag,
 )
 fetch_motivos_rechazos_task >> transform_motivos_rechazos_task
+transform_actividad_revisores_task >> transform_motivos_rechazos_task
 
 
 # ---- tiempo de revision ---------------------------------------------------
@@ -674,8 +666,14 @@ def transform_tiempo_revision(**kwargs):
     )
     dataframe["Mes/Año"] = dataframe["Mes"] + "-" + dataframe["Año"].astype(str)
 
+    # Tiempo de revisión usa el mismo conjunto de auditores UNLaM validado
+    # por actividad de revisores.
+    activity_reviewers = pd.read_parquet(ACTIVIDAD_REVISORES_CLEAN)
+    unlam_reviewers = set(activity_reviewers["Auditor"].dropna().astype(str).unique())
+
     dataframe = dataframe.loc[
         dataframe["Tipo de Cámara"].isin(["Semáforo", "Luces", "Buscador de patentes"])
+        & dataframe["Auditor"].isin(unlam_reviewers)
     ]
     dataframe = dataframe.drop(columns=["Tipo de Revisión", "Nivel de Revisión"], errors="ignore")
     dataframe.drop_duplicates().to_parquet(
@@ -695,6 +693,7 @@ transform_tiempo_revision_task = PythonOperator(
     dag=transito_dag,
 )
 fetch_tiempo_revision_task >> transform_tiempo_revision_task
+transform_actividad_revisores_task >> transform_tiempo_revision_task
 
 
 # ---- imagenes pendientes --------------------------------------------------

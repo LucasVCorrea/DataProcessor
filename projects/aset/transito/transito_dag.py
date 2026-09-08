@@ -780,6 +780,272 @@ transform_imagenes_pendientes_task = PythonOperator(
 fetch_imagenes_pendientes_task >> transform_imagenes_pendientes_task
 
 
+# ---- reportes de camaras ---------------------------------------------------
+
+REPORTES_CAMARAS_RAW = "/tmp/data/transito/reportes_camaras.parquet"
+REPORTES_CAMARAS_CLEAN = "/tmp/data/transito/reportes_camaras_clean.parquet"
+
+
+def fetch_reportes_camaras(**kwargs):
+    import io
+
+    import gspread
+    import pandas as pd
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_name(
+        "/credentials/credentials.json",
+        [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+    client = gspread.authorize(credentials)
+    response = client.http_client.session.get(
+        "https://www.googleapis.com/drive/v3/files",
+        params={
+            "q": (
+                "'1CYZ0SzW6wbAL-pTeys3KNRvdlCHcDAgd' in parents and "
+                "(name = 'reportes_camaras' or name = 'reportes_camaras.csv' "
+                "or name = 'Reportes_camaras.csv') and trashed = false"
+            ),
+            "spaces": "drive",
+            "fields": "files(id,name,mimeType)",
+        },
+    )
+    response.raise_for_status()
+    files = response.json().get("files", [])
+    if not files:
+        raise FileNotFoundError("No se encontró reportes_camaras en Drive")
+
+    drive_file = files[0]
+    if drive_file["mimeType"] == "application/vnd.google-apps.spreadsheet":
+        content = client.http_client.session.get(
+            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}/export",
+            params={"mimeType": "text/csv"},
+        )
+    else:
+        content = client.http_client.session.get(
+            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}",
+            params={"alt": "media"},
+        )
+    content.raise_for_status()
+    dataframe = pd.read_csv(io.BytesIO(content.content), dtype="string")
+    dataframe.to_parquet(REPORTES_CAMARAS_RAW, index=False)
+
+
+def transform_reportes_camaras(**kwargs):
+    import pandas as pd
+
+    dataframe = pd.read_parquet(REPORTES_CAMARAS_RAW)
+    dataframe.columns = dataframe.columns.str.strip()
+    dataframe = dataframe.rename(
+        columns={
+            "Fecha": "Fecha del reporte",
+            "Motivo de rechazo": "Motivo de Rechazo",
+            "Observación": "Observacion",
+            "Resuelto": "Fue resuelto",
+        }
+    )
+
+    required_columns = {
+        "Cliente",
+        "Fecha del reporte",
+        "Fecha del video",
+        "Cámara",
+        "Motivo de Rechazo",
+        "Observacion",
+        "Fue resuelto",
+    }
+    missing_columns = required_columns.difference(dataframe.columns)
+    if missing_columns:
+        raise ValueError(
+            "reportes_camaras no contiene las columnas requeridas: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    if "Usuario" not in dataframe.columns:
+        dataframe["Usuario"] = ""
+
+    for column in ["Fecha del reporte", "Fecha del video"]:
+        values = dataframe[column].astype("string").str.strip()
+        numeric_values = pd.to_numeric(values, errors="coerce")
+        excel_serial = numeric_values.between(
+            20000, 80000, inclusive="both"
+        ).fillna(False)
+        parsed_text = pd.to_datetime(
+            values.where(~excel_serial),
+            format="mixed",
+            dayfirst=True,
+            errors="coerce",
+        )
+        parsed_serial = pd.to_datetime(
+            numeric_values.where(excel_serial),
+            unit="D",
+            origin="1899-12-30",
+            errors="coerce",
+        )
+        dataframe[column] = parsed_text.fillna(parsed_serial).dt.normalize()
+
+    for column in [
+        "Usuario",
+        "Cliente",
+        "Cámara",
+        "Motivo de Rechazo",
+        "Observacion",
+        "Fue resuelto",
+    ]:
+        dataframe[column] = (
+            dataframe[column].astype("string").fillna("").str.strip()
+        )
+
+    dataframe[
+        [
+            "Usuario",
+            "Cliente",
+            "Fecha del reporte",
+            "Fecha del video",
+            "Cámara",
+            "Motivo de Rechazo",
+            "Observacion",
+            "Fue resuelto",
+        ]
+    ].drop_duplicates().to_parquet(REPORTES_CAMARAS_CLEAN, index=False)
+
+
+fetch_reportes_camaras_task = PythonOperator(
+    task_id="fetch_reportes_camaras",
+    python_callable=fetch_reportes_camaras,
+    dag=transito_dag,
+)
+transform_reportes_camaras_task = PythonOperator(
+    task_id="transform_reportes_camaras",
+    python_callable=transform_reportes_camaras,
+    dag=transito_dag,
+)
+fetch_reportes_camaras_task >> transform_reportes_camaras_task
+
+
+# ---- historial de accesos --------------------------------------------------
+
+HISTORIAL_ACCESOS_RAW = "/tmp/data/transito/historial_accesos.parquet"
+HISTORIAL_ACCESOS_CLEAN = "/tmp/data/transito/historial_accesos_clean.parquet"
+
+
+def fetch_historial_accesos(**kwargs):
+    import io
+
+    import gspread
+    import pandas as pd
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_name(
+        "/credentials/credentials.json",
+        [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+    client = gspread.authorize(credentials)
+    response = client.http_client.session.get(
+        "https://www.googleapis.com/drive/v3/files",
+        params={
+            "q": (
+                "'1CYZ0SzW6wbAL-pTeys3KNRvdlCHcDAgd' in parents and "
+                "(name = 'historial_accesos' or name = 'historial_accesos.csv') "
+                "and trashed = false"
+            ),
+            "spaces": "drive",
+            "fields": "files(id,name,mimeType)",
+        },
+    )
+    response.raise_for_status()
+    files = response.json().get("files", [])
+    if not files:
+        raise FileNotFoundError("No se encontró historial_accesos en Drive")
+
+    drive_file = files[0]
+    if drive_file["mimeType"] == "application/vnd.google-apps.spreadsheet":
+        content = client.http_client.session.get(
+            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}/export",
+            params={"mimeType": "text/csv"},
+        )
+    else:
+        content = client.http_client.session.get(
+            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}",
+            params={"alt": "media"},
+        )
+    content.raise_for_status()
+    dataframe = pd.read_csv(io.BytesIO(content.content), dtype="string")
+    dataframe.to_parquet(HISTORIAL_ACCESOS_RAW, index=False)
+
+
+def transform_historial_accesos(**kwargs):
+    import pandas as pd
+
+    dataframe = pd.read_parquet(HISTORIAL_ACCESOS_RAW)
+    dataframe.columns = dataframe.columns.str.strip()
+    dataframe = dataframe.rename(
+        columns={
+            "Fecha y hora": "Fecha y Hora",
+            "Fecha Hora": "Fecha y Hora",
+        }
+    )
+
+    required_columns = {"Nombre", "Usuario", "Rol", "Fecha y Hora"}
+    missing_columns = required_columns.difference(dataframe.columns)
+    if missing_columns:
+        raise ValueError(
+            "historial_accesos no contiene las columnas requeridas: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    for column in ["Nombre", "Usuario", "Rol"]:
+        dataframe[column] = (
+            dataframe[column].astype("string").fillna("").str.strip()
+        )
+
+    values = dataframe["Fecha y Hora"].astype("string").str.strip()
+    numeric_values = pd.to_numeric(values, errors="coerce")
+    excel_serial = numeric_values.between(
+        20000, 80000, inclusive="both"
+    ).fillna(False)
+    parsed_text = pd.to_datetime(
+        values.where(~excel_serial),
+        format="mixed",
+        dayfirst=True,
+        errors="coerce",
+    )
+    parsed_serial = pd.to_datetime(
+        numeric_values.where(excel_serial),
+        unit="D",
+        origin="1899-12-30",
+        errors="coerce",
+    )
+    dataframe["Fecha y Hora"] = parsed_text.fillna(parsed_serial)
+    dataframe = dataframe.loc[dataframe["Fecha y Hora"].notna()]
+
+    dataframe[
+        ["Nombre", "Usuario", "Rol", "Fecha y Hora"]
+    ].drop_duplicates().sort_values("Fecha y Hora").to_parquet(
+        HISTORIAL_ACCESOS_CLEAN,
+        index=False,
+    )
+
+
+fetch_historial_accesos_task = PythonOperator(
+    task_id="fetch_historial_accesos",
+    python_callable=fetch_historial_accesos,
+    dag=transito_dag,
+)
+transform_historial_accesos_task = PythonOperator(
+    task_id="transform_historial_accesos",
+    python_callable=transform_historial_accesos,
+    dag=transito_dag,
+)
+fetch_historial_accesos_task >> transform_historial_accesos_task
+
+
 # ---- joins ----------------------------------------------------------------
 
 ACTIVITY_UF_CLEAN = "/tmp/data/transito/activity_uf_clean.parquet"
@@ -900,6 +1166,24 @@ def build_pending_images_detail(**kwargs):
     )
 
 
+def build_camera_reports_detail(**kwargs):
+    import pandas as pd
+
+    pd.read_parquet(REPORTES_CAMARAS_CLEAN).to_parquet(
+        "/data/transito/camera_reports_detail.parquet",
+        index=False,
+    )
+
+
+def build_access_history_detail(**kwargs):
+    import pandas as pd
+
+    pd.read_parquet(HISTORIAL_ACCESOS_CLEAN).to_parquet(
+        "/data/transito/access_history_detail.parquet",
+        index=False,
+    )
+
+
 def build_reviewer_hourly_detail(**kwargs):
     import pandas as pd
 
@@ -946,6 +1230,16 @@ build_pending_images_detail_task = PythonOperator(
     python_callable=build_pending_images_detail,
     dag=transito_dag,
 )
+build_camera_reports_detail_task = PythonOperator(
+    task_id="build_camera_reports_detail",
+    python_callable=build_camera_reports_detail,
+    dag=transito_dag,
+)
+build_access_history_detail_task = PythonOperator(
+    task_id="build_access_history_detail",
+    python_callable=build_access_history_detail,
+    dag=transito_dag,
+)
 build_reviewer_hourly_detail_task = PythonOperator(
     task_id="build_reviewer_hourly_detail",
     python_callable=build_reviewer_hourly_detail,
@@ -956,4 +1250,6 @@ join_activity_uf_task >> build_activity_reviewers_detail_task
 transform_motivos_rechazos_task >> build_rejection_reasons_detail_task
 transform_tiempo_revision_task >> build_review_time_detail_task
 transform_imagenes_pendientes_task >> build_pending_images_detail_task
+transform_reportes_camaras_task >> build_camera_reports_detail_task
+transform_historial_accesos_task >> build_access_history_detail_task
 join_activity_review_time_task >> build_reviewer_hourly_detail_task

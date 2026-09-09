@@ -6,9 +6,9 @@ from airflow.providers.standard.operators.python import PythonOperator
 
 transito_dag = DAG(
     dag_id="transito_dag",
-    start_date=datetime.datetime(2026, 9, 3),
+    start_date=datetime.datetime.now(),
     catchup=False,
-    schedule="@daily",
+    schedule="@hourly",
 )
 
 
@@ -239,6 +239,7 @@ fetch_actividad_revisores_task = PythonOperator(
     task_id="fetch_actividad_revisores",
     python_callable=fetch_actividad_revisores,
     dag=transito_dag,
+    pool='google_drive_pool',
 )
 transform_actividad_revisores_task = PythonOperator(
     task_id="transform_actividad_revisores",
@@ -325,6 +326,7 @@ fetch_valores_uf_task = PythonOperator(
     task_id="fetch_valores_uf",
     python_callable=fetch_valores_uf,
     dag=transito_dag,
+    pool='google_drive_pool',
 )
 transform_valores_uf_task = PythonOperator(
     task_id="transform_valores_uf",
@@ -536,6 +538,7 @@ fetch_motivos_rechazos_task = PythonOperator(
     task_id="fetch_motivos_rechazos",
     python_callable=fetch_motivos_rechazos,
     dag=transito_dag,
+    pool='google_drive_pool',
 )
 transform_motivos_rechazos_task = PythonOperator(
     task_id="transform_motivos_rechazos",
@@ -686,6 +689,7 @@ fetch_tiempo_revision_task = PythonOperator(
     task_id="fetch_tiempo_revision",
     python_callable=fetch_tiempo_revision,
     dag=transito_dag,
+    pool='google_drive_pool',
 )
 transform_tiempo_revision_task = PythonOperator(
     task_id="transform_tiempo_revision",
@@ -771,6 +775,7 @@ fetch_imagenes_pendientes_task = PythonOperator(
     task_id="fetch_imagenes_pendientes",
     python_callable=fetch_imagenes_pendientes,
     dag=transito_dag,
+    pool='google_drive_pool',
 )
 transform_imagenes_pendientes_task = PythonOperator(
     task_id="transform_imagenes_pendientes",
@@ -917,6 +922,7 @@ fetch_reportes_camaras_task = PythonOperator(
     task_id="fetch_reportes_camaras",
     python_callable=fetch_reportes_camaras,
     dag=transito_dag,
+    pool='google_drive_pool',
 )
 transform_reportes_camaras_task = PythonOperator(
     task_id="transform_reportes_camaras",
@@ -1037,6 +1043,7 @@ fetch_historial_accesos_task = PythonOperator(
     task_id="fetch_historial_accesos",
     python_callable=fetch_historial_accesos,
     dag=transito_dag,
+    pool='google_drive_pool',
 )
 transform_historial_accesos_task = PythonOperator(
     task_id="transform_historial_accesos",

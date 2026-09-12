@@ -10,6 +10,7 @@ resolution-markers = [
 [manifest]
 members = [
     "airflow-base",
+    "airflow-base-worker",
     "airflow-google-worker",
     "aset-berisso-worker",
     "asterius-dataloader-worker",
@@ -67,11 +68,27 @@ requires-dist = [
 ]
 
 [[package]]
+name = "airflow-base-worker"
+version = "0.1.0"
+source = { editable = "base_workers/base-worker" }
+dependencies = [
+    { name = "airflow-base" },
+    { name = "requests" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "airflow-base", editable = "airflow_base" },
+    { name = "requests" },
+]
+
+[[package]]
 name = "airflow-google-worker"
 version = "0.1.0"
 source = { editable = "base_workers/google-worker" }
 dependencies = [
     { name = "airflow-base" },
+    { name = "airflow-base-worker" },
     { name = "gspread" },
     { name = "oauth2client" },
     { name = "pandas" },
@@ -81,6 +98,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "airflow-base", editable = "airflow_base" },
+    { name = "airflow-base-worker", editable = "base_workers/base-worker" },
     { name = "gspread" },
     { name = "oauth2client" },
     { name = "pandas" },

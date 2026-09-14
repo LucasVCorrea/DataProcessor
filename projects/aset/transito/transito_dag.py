@@ -229,7 +229,19 @@ def transform_actividad_revisores(**kwargs):
         columns=["Tipo de Revisión", "% aceptadas", "Recorte", "Deshacer", "NoOp"],
         errors="ignore",
     )
-    dataframe.drop_duplicates().sort_values("Mes", ascending=False).to_parquet(
+    auditor_order = sorted(
+        dataframe["Auditor"].dropna().astype(str).unique(),
+        reverse=True,
+    )
+    dataframe["Auditor"] = pd.Categorical(
+        dataframe["Auditor"],
+        categories=auditor_order,
+        ordered=True,
+    )
+    dataframe.drop_duplicates().sort_values(
+        ["Mes", "Auditor"],
+        ascending=[False, True],
+    ).to_parquet(
         ACTIVIDAD_REVISORES_CLEAN,
         index=False,
     )
@@ -679,7 +691,16 @@ def transform_tiempo_revision(**kwargs):
         & dataframe["Auditor"].isin(unlam_reviewers)
     ]
     dataframe = dataframe.drop(columns=["Tipo de Revisión", "Nivel de Revisión"], errors="ignore")
-    dataframe.drop_duplicates().to_parquet(
+    auditor_order = sorted(dataframe["Auditor"].dropna().astype(str).unique())
+    dataframe["Auditor"] = pd.Categorical(
+        dataframe["Auditor"],
+        categories=auditor_order,
+        ordered=True,
+    )
+    dataframe.drop_duplicates().sort_values(
+        ["Fecha", "Auditor"],
+        ascending=[True, True],
+    ).to_parquet(
         TIEMPO_REVISION_CLEAN,
         index=False,
     )

@@ -1,0 +1,4 @@
+fetch_juicios_iniciados > transform_juicios_iniciados
+transform_juicios_iniciados > build_juicios_iniciados_detail
+fetch_juicios_cobrados > transform_juicios_cobrados
+transform_juicios_cobrados > build_juicios_cobrados_detail

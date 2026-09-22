@@ -1,0 +1,15 @@
+[project]
+name = "aset-ezeiza-worker"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "airflow-google-worker",
+    "gspread",
+    "oauth2client",
+    "openpyxl",
+    "pandas",
+    "pyarrow",
+]
+
+[tool.uv.sources]
+airflow-google-worker = { workspace = true }

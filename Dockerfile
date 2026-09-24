@@ -17,7 +17,18 @@ RUN uv sync --frozen --package airflow-base
 
 ENTRYPOINT ["uv", "run", "--package","airflow-base","airflow"]
 
-FROM airflow_base AS worker
+
+FROM airflow_base AS base_worker
+
+COPY base_workers/base-worker /opt/base_workers/base-worker
+
+WORKDIR /opt/base_workers/base-worker
+RUN uv sync --frozen --project .
+
+ENTRYPOINT ["uv","run","--project",".","airflow"]
+
+
+FROM base_worker AS worker
 
 ARG WORKER_NAME=worker
 
@@ -30,12 +41,11 @@ ENTRYPOINT ["uv","run","--project",".","airflow"]
 
 #Specific workers
 
-FROM airflow_base AS g-worker-base
+FROM base_worker AS g-worker-base
 
 COPY base_workers/google-worker /opt/base_workers/google-worker
 
 WORKDIR /opt/base_workers/google-worker
-
 RUN uv sync --frozen --project .
 
 ENTRYPOINT ["uv","run","--project",".","airflow"]

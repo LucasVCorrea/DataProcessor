@@ -32,8 +32,10 @@ def fetch_actas_pagadas(**kwargs):
     )
     client = gspread.authorize(credentials)
     worksheet = client.open("actas_pagadas").sheet1
-    values = worksheet.get_all_values()
+    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
     dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
+    if not dataframe.empty:
+        dataframe = dataframe.astype("string")
     dataframe.to_parquet(ACTAS_PAGADAS_RAW, index=False)
 
 def transform_payments(**kwargs):
@@ -63,16 +65,26 @@ def transform_payments(**kwargs):
     for column in ["lote_id", "comprobante_id"]:
         if column in dataframe.columns:
             values = dataframe[column].astype("string").str.strip()
-            values = values.str.replace(".", "", regex=False).str.replace(",", "", regex=False)
             dataframe[column] = pd.to_numeric(values, errors="coerce").astype("Int64")
 
     for column in ["fecha_pago", "created_at", "fecha_acreditacion"]:
-        dataframe[column] = pd.to_datetime(
-            dataframe[column].astype("string").str.strip(),
+        values = dataframe[column].astype("string").str.strip()
+        numeric_values = pd.to_numeric(values, errors="coerce")
+        excel_serial = numeric_values.between(20000, 80000, inclusive="both")
+
+        parsed_text = pd.to_datetime(
+            values.where(~excel_serial),
             format="mixed",
             dayfirst=False,
             errors="coerce",
         )
+        parsed_serial = pd.to_datetime(
+            numeric_values.where(excel_serial),
+            unit="D",
+            origin="1899-12-30",
+            errors="coerce",
+        )
+        dataframe[column] = parsed_text.fillna(parsed_serial)
 
     dataframe["numero"] = dataframe["numero"].astype("string").fillna("").str.strip()
     today = pd.Timestamp.now(

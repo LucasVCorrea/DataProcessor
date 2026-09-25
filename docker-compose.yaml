@@ -252,6 +252,8 @@ services:
       - berissoTmpData:/tmp/data/berisso
       - transitoData:/data/transito
       - transitoTmpData:/tmp/data/transito
+      - ezeizaData:/data/ezeiza
+      - ezeizaTmpData:/tmp/data/ezeiza
       - credentials:/credentials
     user: "0:0"
     command: ["celery","worker"]
@@ -548,4 +550,6 @@ volumes:
   berissoTmpData:
   transitoData:
   transitoTmpData:
+  ezeizaData:
+  ezeizaTmpData:
   credentials:

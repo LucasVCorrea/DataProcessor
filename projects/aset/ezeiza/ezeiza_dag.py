@@ -13,11 +13,10 @@ ezeiza_dag = DAG(
 )
 
 
-DRIVE_FOLDER = "ezeiza"
-JUICIOS_INICIADOS_RAW = "/tmp/data/ezeiza/juicios_iniciados.xlsx"
+JUICIOS_INICIADOS_RAW = "/tmp/data/ezeiza/juicios_iniciados.parquet"
 JUICIOS_INICIADOS_CLEAN = "/tmp/data/ezeiza/juicios_iniciados_clean.parquet"
 JUICIOS_INICIADOS_DETAIL = "/data/ezeiza/juicios_iniciados_detail.parquet"
-JUICIOS_COBRADOS_RAW = "/tmp/data/ezeiza/juicios_cobrados.xlsx"
+JUICIOS_COBRADOS_RAW = "/tmp/data/ezeiza/juicios_cobrados.parquet"
 JUICIOS_COBRADOS_CLEAN = "/tmp/data/ezeiza/juicios_cobrados_clean.parquet"
 JUICIOS_COBRADOS_DETAIL = "/data/ezeiza/juicios_cobrados_detail.parquet"
 
@@ -35,82 +34,6 @@ MONTHS = {
     "November": "Noviembre",
     "December": "Diciembre",
 }
-
-
-def _download_excel_from_drive(file_name, destination):
-    import os
-
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    session = client.http_client.session
-
-    folder_response = session.get(
-        "https://www.googleapis.com/drive/v3/files",
-        params={
-            "q": (
-                f"name = '{DRIVE_FOLDER}' and "
-                "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-            ),
-            "spaces": "drive",
-            "orderBy": "modifiedTime desc",
-            "fields": "files(id,name,modifiedTime)",
-        },
-    )
-    folder_response.raise_for_status()
-    folders = folder_response.json().get("files", [])
-    if not folders:
-        raise FileNotFoundError(f"No se encontró la carpeta {DRIVE_FOLDER} en Drive")
-
-    folder_id = folders[0]["id"]
-    file_response = session.get(
-        "https://www.googleapis.com/drive/v3/files",
-        params={
-            "q": (
-                f"'{folder_id}' in parents and "
-                f"(name = '{file_name}' or name = '{file_name}.xlsx') and "
-                "trashed = false"
-            ),
-            "spaces": "drive",
-            "orderBy": "modifiedTime desc",
-            "fields": "files(id,name,mimeType,modifiedTime)",
-        },
-    )
-    file_response.raise_for_status()
-    files = file_response.json().get("files", [])
-    if not files:
-        raise FileNotFoundError(
-            f"No se encontró {file_name} dentro de la carpeta {DRIVE_FOLDER}"
-        )
-
-    drive_file = files[0]
-    if drive_file["mimeType"] == "application/vnd.google-apps.spreadsheet":
-        content = session.get(
-            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}/export",
-            params={
-                "mimeType": (
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            },
-        )
-    else:
-        content = session.get(
-            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}",
-            params={"alt": "media"},
-        )
-    content.raise_for_status()
-
-    os.makedirs(os.path.dirname(destination), exist_ok=True)
-    with open(destination, "wb") as output:
-        output.write(content.content)
 
 
 def _parse_dates(series):
@@ -161,14 +84,28 @@ def _normalize_identifier(series):
 
 
 def fetch_juicios_iniciados(**kwargs):
-    _download_excel_from_drive("juicios_iniciados", JUICIOS_INICIADOS_RAW)
+    import gspread
+    import pandas as pd
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_name(
+        "/credentials/credentials.json",
+        [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+    client = gspread.authorize(credentials)
+    worksheet = client.open("juicios_iniciados").sheet1
+    values = worksheet.get_all_values()
+    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
+    dataframe.to_parquet(JUICIOS_INICIADOS_RAW, index=False)
 
 
 def transform_juicios_iniciados(**kwargs):
     import pandas as pd
 
-    sheets = pd.read_excel(JUICIOS_INICIADOS_RAW, sheet_name=None)
-    dataframe = pd.concat(sheets.values(), ignore_index=True)
+    dataframe = pd.read_parquet(JUICIOS_INICIADOS_RAW)
     dataframe = dataframe.dropna(axis=0, how="all").dropna(axis=1, how="all")
     dataframe.columns = dataframe.columns.astype(str).str.strip()
     drop_columns = [
@@ -177,17 +114,6 @@ def transform_juicios_iniciados(**kwargs):
         if not column or column.lower().startswith("unnamed:")
     ]
     dataframe = dataframe.drop(columns=drop_columns, errors="ignore")
-    dataframe = dataframe.rename(
-        columns={
-            "DEMANDADO": "Nombre",
-            "CUIT": "Cuit",
-            "EXPTE": "Expediente Juzgado De Paz",
-            "MONTO": "Monto De La Demanda",
-            "JUZ.": "Juzgado De Faltas",
-            "FECHA": "Fecha De Inicio De La Demanda",
-            "ACTOR": "Actor",
-        }
-    )
 
     required_columns = {
         "Nombre",
@@ -259,27 +185,30 @@ def build_juicios_iniciados_detail(**kwargs):
 
 
 def fetch_juicios_cobrados(**kwargs):
-    _download_excel_from_drive("juicios_cobrados", JUICIOS_COBRADOS_RAW)
+    import gspread
+    import pandas as pd
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_name(
+        "/credentials/credentials.json",
+        [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+    client = gspread.authorize(credentials)
+    worksheet = client.open("juicios_cobrados").sheet1
+    values = worksheet.get_all_values()
+    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
+    dataframe.to_parquet(JUICIOS_COBRADOS_RAW, index=False)
 
 
 def transform_juicios_cobrados(**kwargs):
     import pandas as pd
 
-    sheets = pd.read_excel(JUICIOS_COBRADOS_RAW, sheet_name=None)
-    dataframe = pd.concat(sheets.values(), ignore_index=True)
+    dataframe = pd.read_parquet(JUICIOS_COBRADOS_RAW)
     dataframe = dataframe.dropna(axis=0, how="all").dropna(axis=1, how="all")
     dataframe.columns = dataframe.columns.astype(str).str.strip()
-    dataframe = dataframe.rename(
-        columns={
-            "EXP JUD.": "Expediente",
-            "CUIT": "Cuit",
-            "Monto cobrado": "Monto Cobrado",
-            "Multa cobrada": "Multa Cobrada",
-            "gastos adm.": "Gastos Administrativos",
-            "Forma de pago": "Forma De Pago",
-            "JUZG": "Juzgado",
-        }
-    )
 
     required_columns = {
         "Expediente",
@@ -325,9 +254,6 @@ def transform_juicios_cobrados(**kwargs):
         dataframe.loc[shifted_rows, "Multa Cobrada"] = multa
         dataframe.loc[shifted_rows, "Monto Cobrado"] = multa + gastos
 
-    dataframe["Nombre"] = dataframe["Nombre"].replace(
-        {"MERCEDES ENZ ARG. SA": "MERCEDES BENZ ARG. S.A"}
-    )
     dataframe["Nombre"] = (
         dataframe["Nombre"]
         .astype("string")

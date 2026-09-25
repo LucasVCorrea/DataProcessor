@@ -2,6 +2,7 @@ import datetime
 
 from airflow.sdk import DAG
 from airflow.providers.standard.operators.python import PythonOperator
+from google_worker import GdriveLimitedPythonOperator
 
 
 transito_dag = DAG(
@@ -31,7 +32,7 @@ def fetch_actividad_revisores(**kwargs):
         ],
     )
     client = gspread.authorize(credentials)
-    worksheet = client.open("actividad_revisores").sheet1
+    worksheet = client.open("actividad_revisores_t").sheet1
     values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
     dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
     if not dataframe.empty:
@@ -247,11 +248,10 @@ def transform_actividad_revisores(**kwargs):
     )
 
 
-fetch_actividad_revisores_task = PythonOperator(
+fetch_actividad_revisores_task = GdriveLimitedPythonOperator(
     task_id="fetch_actividad_revisores",
     python_callable=fetch_actividad_revisores,
     dag=transito_dag,
-    pool='google_drive_pool',
 )
 transform_actividad_revisores_task = PythonOperator(
     task_id="transform_actividad_revisores",
@@ -334,11 +334,10 @@ def transform_valores_uf(**kwargs):
     )
 
 
-fetch_valores_uf_task = PythonOperator(
+fetch_valores_uf_task = GdriveLimitedPythonOperator(
     task_id="fetch_valores_uf",
     python_callable=fetch_valores_uf,
     dag=transito_dag,
-    pool='google_drive_pool',
 )
 transform_valores_uf_task = PythonOperator(
     task_id="transform_valores_uf",
@@ -546,11 +545,10 @@ def transform_motivos_rechazos(**kwargs):
     )
 
 
-fetch_motivos_rechazos_task = PythonOperator(
+fetch_motivos_rechazos_task = GdriveLimitedPythonOperator(
     task_id="fetch_motivos_rechazos",
     python_callable=fetch_motivos_rechazos,
     dag=transito_dag,
-    pool='google_drive_pool',
 )
 transform_motivos_rechazos_task = PythonOperator(
     task_id="transform_motivos_rechazos",
@@ -706,11 +704,10 @@ def transform_tiempo_revision(**kwargs):
     )
 
 
-fetch_tiempo_revision_task = PythonOperator(
+fetch_tiempo_revision_task = GdriveLimitedPythonOperator(
     task_id="fetch_tiempo_revision",
     python_callable=fetch_tiempo_revision,
     dag=transito_dag,
-    pool='google_drive_pool',
 )
 transform_tiempo_revision_task = PythonOperator(
     task_id="transform_tiempo_revision",
@@ -792,11 +789,10 @@ def transform_imagenes_pendientes(**kwargs):
     dataframe.drop_duplicates().to_parquet(IMAGENES_PENDIENTES_CLEAN, index=False)
 
 
-fetch_imagenes_pendientes_task = PythonOperator(
+fetch_imagenes_pendientes_task = GdriveLimitedPythonOperator(
     task_id="fetch_imagenes_pendientes",
     python_callable=fetch_imagenes_pendientes,
     dag=transito_dag,
-    pool='google_drive_pool',
 )
 transform_imagenes_pendientes_task = PythonOperator(
     task_id="transform_imagenes_pendientes",
@@ -813,8 +809,6 @@ REPORTES_CAMARAS_CLEAN = "/tmp/data/transito/reportes_camaras_clean.parquet"
 
 
 def fetch_reportes_camaras(**kwargs):
-    import io
-
     import gspread
     import pandas as pd
     from oauth2client.service_account import ServiceAccountCredentials
@@ -827,36 +821,11 @@ def fetch_reportes_camaras(**kwargs):
         ],
     )
     client = gspread.authorize(credentials)
-    response = client.http_client.session.get(
-        "https://www.googleapis.com/drive/v3/files",
-        params={
-            "q": (
-                "'1CYZ0SzW6wbAL-pTeys3KNRvdlCHcDAgd' in parents and "
-                "(name = 'reportes_camaras' or name = 'reportes_camaras.csv' "
-                "or name = 'Reportes_camaras.csv') and trashed = false"
-            ),
-            "spaces": "drive",
-            "fields": "files(id,name,mimeType)",
-        },
-    )
-    response.raise_for_status()
-    files = response.json().get("files", [])
-    if not files:
-        raise FileNotFoundError("No se encontró reportes_camaras en Drive")
-
-    drive_file = files[0]
-    if drive_file["mimeType"] == "application/vnd.google-apps.spreadsheet":
-        content = client.http_client.session.get(
-            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}/export",
-            params={"mimeType": "text/csv"},
-        )
-    else:
-        content = client.http_client.session.get(
-            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}",
-            params={"alt": "media"},
-        )
-    content.raise_for_status()
-    dataframe = pd.read_csv(io.BytesIO(content.content), dtype="string")
+    worksheet = client.open("reportes_camaras").sheet1
+    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
+    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
+    if not dataframe.empty:
+        dataframe = dataframe.astype("string")
     dataframe.to_parquet(REPORTES_CAMARAS_RAW, index=False)
 
 
@@ -939,11 +908,10 @@ def transform_reportes_camaras(**kwargs):
     ].drop_duplicates().to_parquet(REPORTES_CAMARAS_CLEAN, index=False)
 
 
-fetch_reportes_camaras_task = PythonOperator(
+fetch_reportes_camaras_task = GdriveLimitedPythonOperator(
     task_id="fetch_reportes_camaras",
     python_callable=fetch_reportes_camaras,
     dag=transito_dag,
-    pool='google_drive_pool',
 )
 transform_reportes_camaras_task = PythonOperator(
     task_id="transform_reportes_camaras",
@@ -960,8 +928,6 @@ HISTORIAL_ACCESOS_CLEAN = "/tmp/data/transito/historial_accesos_clean.parquet"
 
 
 def fetch_historial_accesos(**kwargs):
-    import io
-
     import gspread
     import pandas as pd
     from oauth2client.service_account import ServiceAccountCredentials
@@ -974,36 +940,11 @@ def fetch_historial_accesos(**kwargs):
         ],
     )
     client = gspread.authorize(credentials)
-    response = client.http_client.session.get(
-        "https://www.googleapis.com/drive/v3/files",
-        params={
-            "q": (
-                "'1CYZ0SzW6wbAL-pTeys3KNRvdlCHcDAgd' in parents and "
-                "(name = 'historial_accesos' or name = 'historial_accesos.csv') "
-                "and trashed = false"
-            ),
-            "spaces": "drive",
-            "fields": "files(id,name,mimeType)",
-        },
-    )
-    response.raise_for_status()
-    files = response.json().get("files", [])
-    if not files:
-        raise FileNotFoundError("No se encontró historial_accesos en Drive")
-
-    drive_file = files[0]
-    if drive_file["mimeType"] == "application/vnd.google-apps.spreadsheet":
-        content = client.http_client.session.get(
-            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}/export",
-            params={"mimeType": "text/csv"},
-        )
-    else:
-        content = client.http_client.session.get(
-            f"https://www.googleapis.com/drive/v3/files/{drive_file['id']}",
-            params={"alt": "media"},
-        )
-    content.raise_for_status()
-    dataframe = pd.read_csv(io.BytesIO(content.content), dtype="string")
+    worksheet = client.open("historial_accesos").sheet1
+    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
+    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
+    if not dataframe.empty:
+        dataframe = dataframe.astype("string")
     dataframe.to_parquet(HISTORIAL_ACCESOS_RAW, index=False)
 
 
@@ -1060,11 +1001,10 @@ def transform_historial_accesos(**kwargs):
     )
 
 
-fetch_historial_accesos_task = PythonOperator(
+fetch_historial_accesos_task = GdriveLimitedPythonOperator(
     task_id="fetch_historial_accesos",
     python_callable=fetch_historial_accesos,
     dag=transito_dag,
-    pool='google_drive_pool',
 )
 transform_historial_accesos_task = PythonOperator(
     task_id="transform_historial_accesos",

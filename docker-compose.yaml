@@ -72,7 +72,7 @@ services:
     restart: always
 
   airflow-apiserver:
-    image: airDP/airflow:latest
+    image: airDP/google-worker:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}
@@ -121,7 +121,7 @@ services:
       - airflow-init
 
   airflow-scheduler:
-    image: airDP/airflow:latest
+    image: airDP/google-worker:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}
@@ -169,7 +169,7 @@ services:
 
 
   airflow-dag-processor:
-    image: airDP/airflow:latest
+    image: airDP/google-worker:latest
     # build: .
     env_file:
       - ${ENV_FILE_PATH:-.env}

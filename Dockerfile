@@ -44,6 +44,7 @@ ENTRYPOINT ["uv","run","--project",".","airflow"]
 FROM base_worker AS g-worker-base
 
 COPY base_workers/google-worker /opt/base_workers/google-worker
+COPY projects/aset /opt/airflow/dags/aset
 
 WORKDIR /opt/base_workers/google-worker
 RUN uv sync --frozen --project .

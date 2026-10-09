@@ -8,7 +8,9 @@ dependencies = [
     "pandas",
     "pyarrow",
     "gspread",
-    "oauth2client"
+    "oauth2client",
+    "google-auth",
+    "boto3"
 ]
 
 [tool.uv.sources]

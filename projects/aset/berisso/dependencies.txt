@@ -51,3 +51,14 @@ join_infraction_data > build_dashboard_monthly_metrics
 join_infraction_data > build_camera_by_month_type
 join_infraction_data > build_camera_by_month_total
 join_infraction_data > build_camera_map
+fetch_actas_notificadas_extra > transform_notifications_door_extra
+transform_notifications_door_extra > build_notifications_door_extra_detail
+check_berisso_sources > fetch_actas_pagadas
+check_berisso_sources > fetch_actas_enviadas
+check_berisso_sources > fetch_detalles_infracciones
+check_berisso_sources > fetch_actas_cantidad
+check_berisso_sources > fetch_actas_notificadas
+check_berisso_sources > fetch_actas_notificadas_extra
+check_berisso_sources > fetch_actas_notificadas_email
+check_berisso_sources > fetch_actividad_revisores
+check_berisso_sources > fetch_fallos

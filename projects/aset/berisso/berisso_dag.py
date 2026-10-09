@@ -1,14 +1,134 @@
 import datetime
+import json
+import os
+from pathlib import Path
 
 from airflow.sdk import DAG
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator, ShortCircuitOperator
 
 
 berisso_dag = DAG(
     dag_id="berisso_dag",
     start_date=datetime.datetime(2026, 8, 25),
     catchup=False,
-    schedule="@daily",
+    max_active_runs=1,
+    schedule="* * * * *",
+)
+
+
+SOURCE_FILES = [
+    "Actas Notificada bajo puerta info extra.csv",
+    "Actas enviadas al correo.csv",
+    "Actas por Tipo de Infraccion.csv",
+    "Actividad_revisores_nivel_5.csv",
+    "Detalle de actas pagas.csv",
+    "Fallos.csv",
+    "Listado de actas notificadas email.csv",
+    "Listado de actas notificadas.csv",
+    "detalles_de_infracciones.csv",
+]
+
+
+def _output_path(file_name):
+    output_dir = Path(os.getenv("BERISSO_DATA_DIR", "/data/berisso"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir / file_name)
+
+def _state_key(file_name):
+    prefix = os.getenv("BERISSO_S3_PREFIX", "processed/berisso").strip("/")
+    return f"{prefix}/{file_name}"
+
+
+def _load_state(file_name):
+    bucket = os.getenv("BERISSO_S3_BUCKET")
+    if bucket:
+        import boto3
+        from botocore.exceptions import ClientError
+
+        try:
+            response = boto3.client("s3").get_object(Bucket=bucket, Key=_state_key(file_name))
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return None
+            raise
+        return json.loads(response["Body"].read())
+
+    path = Path(_output_path(file_name))
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _save_state(file_name, payload):
+    bucket = os.getenv("BERISSO_S3_BUCKET")
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
+    if bucket:
+        import boto3
+
+        boto3.client("s3").put_object(
+            Bucket=bucket,
+            Key=_state_key(file_name),
+            Body=serialized.encode("utf-8"),
+            ContentType="application/json",
+        )
+        return
+
+    Path(_output_path(file_name)).write_text(serialized, encoding="utf-8")
+
+
+def _fetch_csv(file_name, target_path, low_memory=False, **kwargs):
+    from google_worker.drive_csv import read_csv
+
+    manifest = kwargs["ti"].xcom_pull(task_ids="check_berisso_sources") or {}
+    file_id = manifest.get(file_name, {}).get("id")
+    dataframe = read_csv(
+        file_name,
+        low_memory=low_memory,
+        file_id=file_id,
+    )
+    dataframe.to_parquet(target_path, index=False)
+
+
+def check_berisso_sources(**kwargs):
+    from google_worker.drive_csv import folder_manifest
+
+    current = folder_manifest(SOURCE_FILES)
+    previous = _load_state("_source_manifest.json")
+    if current == previous:
+        return False
+    return current
+
+
+def publish_berisso_dataset(**kwargs):
+    source_manifest = kwargs["ti"].xcom_pull(task_ids="check_berisso_sources")
+    now = datetime.datetime.now(datetime.UTC)
+    version = now.strftime("%Y%m%dT%H%M%S%fZ")
+    dataset_manifest = {
+        "version": version,
+        "updated_at": now.isoformat(),
+        "source": source_manifest,
+    }
+
+    bucket = os.getenv("BERISSO_S3_BUCKET")
+    if bucket:
+        import boto3
+
+        prefix = os.getenv("BERISSO_S3_PREFIX", "processed/berisso").strip("/")
+        version_prefix = f"{prefix}/versions/{version}"
+        client = boto3.client("s3")
+        output_dir = Path(os.getenv("BERISSO_DATA_DIR", "/data/berisso"))
+        for path in sorted(output_dir.glob("*.parquet")):
+            client.upload_file(str(path), bucket, f"{version_prefix}/{path.name}")
+        dataset_manifest["prefix"] = version_prefix
+
+    _save_state("_dataset_manifest.json", dataset_manifest)
+    _save_state("_source_manifest.json", source_manifest)
+
+
+check_berisso_sources_task = ShortCircuitOperator(
+    task_id="check_berisso_sources",
+    python_callable=check_berisso_sources,
+    dag=berisso_dag,
 )
 
 
@@ -19,24 +139,7 @@ PAYMENTS_CLEAN = "/tmp/data/berisso/payments_clean.parquet"
 
 
 def fetch_actas_pagadas(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("actas_pagadas").sheet1
-    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    if not dataframe.empty:
-        dataframe = dataframe.astype("string")
-    dataframe.to_parquet(ACTAS_PAGADAS_RAW, index=False)
+    _fetch_csv("Detalle de actas pagas.csv", ACTAS_PAGADAS_RAW, **kwargs)
 
 def transform_payments(**kwargs):
     import pandas as pd
@@ -70,7 +173,11 @@ def transform_payments(**kwargs):
     for column in ["fecha_pago", "created_at", "fecha_acreditacion"]:
         values = dataframe[column].astype("string").str.strip()
         numeric_values = pd.to_numeric(values, errors="coerce")
-        excel_serial = numeric_values.between(20000, 80000, inclusive="both")
+        excel_serial = numeric_values.between(
+            20000,
+            80000,
+            inclusive="both",
+        ).fillna(False)
 
         parsed_text = pd.to_datetime(
             values.where(~excel_serial),
@@ -84,6 +191,8 @@ def transform_payments(**kwargs):
             origin="1899-12-30",
             errors="coerce",
         )
+        parsed_text = parsed_text.astype("datetime64[us]")
+        parsed_serial = parsed_serial.astype("datetime64[us]")
         dataframe[column] = parsed_text.fillna(parsed_serial)
 
     dataframe["numero"] = dataframe["numero"].astype("string").fillna("").str.strip()
@@ -143,22 +252,7 @@ GENERATED_NOTIFICATIONS_CLEAN = "/tmp/data/berisso/generated_notifications_clean
 
 
 def fetch_actas_enviadas(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("actas_enviadas").sheet1
-    values = worksheet.get_all_values()
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    dataframe.to_parquet(ACTAS_ENVIADAS_RAW, index=False)
+    _fetch_csv("Actas enviadas al correo.csv", ACTAS_ENVIADAS_RAW, **kwargs)
 
 def transform_generated_notifications(**kwargs):
     import pandas as pd
@@ -223,23 +317,7 @@ DETALLES_INFRACCIONES_CLEAN = "/tmp/data/berisso/detalles_infracciones_clean.par
 
 
 def fetch_detalles_infracciones(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("detalles_infracciones").sheet1
-    values = worksheet.get_all_values()
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    dataframe.to_parquet(DETALLES_INFRACCIONES_RAW, index=False)
-
+    _fetch_csv("detalles_de_infracciones.csv", DETALLES_INFRACCIONES_RAW, **kwargs)
 
 def transform_detalles_infracciones(**kwargs):
     import pandas as pd
@@ -285,6 +363,13 @@ def transform_detalles_infracciones(**kwargs):
         & dataframe["Mes"].ne("")
         & dataframe["Tipo de Faltas"].ne("")
     ]
+
+    key_columns = ["Año", "Mes", "Tipo de Faltas"]
+    duplicated = dataframe.loc[dataframe.duplicated(key_columns, keep=False), key_columns]
+    if not duplicated.empty:
+        rows = duplicated.drop_duplicates().to_dict("records")
+        raise ValueError(f"Hay tarifas duplicadas en detalles_de_infracciones.csv: {rows}")
+
     dataframe.to_parquet(DETALLES_INFRACCIONES_CLEAN, index=False)
 
 
@@ -309,23 +394,7 @@ INFRACTION_DETAIL_CLEAN = "/tmp/data/berisso/infraction_detail_clean.parquet"
 
 
 def fetch_actas_cantidad(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("actas_cantidad").sheet1
-    values = worksheet.get_all_values()
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    dataframe.to_parquet(ACTAS_CANTIDAD_RAW, index=False)
-
+    _fetch_csv("Actas por Tipo de Infraccion.csv", ACTAS_CANTIDAD_RAW, **kwargs)
 
 def transform_actas_cantidad(**kwargs):
     import pandas as pd
@@ -471,6 +540,15 @@ def join_infraction_data(**kwargs):
         values["Tipo de Faltas"].astype("string").fillna("").str.strip()
     )
 
+    key_columns = ["Año", "Mes", "Tipo de Faltas"]
+    count_keys = counts[key_columns].drop_duplicates()
+    value_keys = values[key_columns].drop_duplicates()
+    missing_values = count_keys.merge(value_keys, on=key_columns, how="left", indicator=True)
+    missing_values = missing_values.loc[missing_values["_merge"] == "left_only", key_columns]
+    if not missing_values.empty:
+        rows = missing_values.to_dict("records")
+        raise ValueError(f"Faltan tarifas para infracciones existentes: {rows}")
+
     dataframe = counts.merge(
         values,
         on=["Año", "Mes", "Tipo de Faltas"],
@@ -537,22 +615,7 @@ NOTIFICATIONS_DOOR_CLEAN = "/tmp/data/berisso/notifications_door_clean.parquet"
 
 
 def fetch_actas_notificadas(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("actas_notificadas").sheet1
-    values = worksheet.get_all_values()
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    dataframe.to_parquet(ACTAS_NOTIFICADAS_RAW, index=False)
+    _fetch_csv("Listado de actas notificadas.csv", ACTAS_NOTIFICADAS_RAW, low_memory=False, **kwargs)
 
 def transform_notifications_door(**kwargs):
     import pandas as pd
@@ -562,13 +625,16 @@ def transform_notifications_door(**kwargs):
     dataframe["notific_type"] = "Bajo Puerta"
     if "numero_acta" in dataframe.columns and "acta" not in dataframe.columns:
         dataframe = dataframe.rename(columns={"numero_acta": "acta"})
+    elif "acta" not in dataframe.columns and "acta_id" in dataframe.columns:
+        dataframe["acta"] = dataframe["acta_id"]
 
     dataframe["acta"] = dataframe["acta"].astype("string").fillna("").str.strip()
-    for column in ["acta_id", "lote_id"]:
-        if column in dataframe.columns:
-            values = dataframe[column].astype("string").str.strip()
-            values = values.str.replace(".", "", regex=False).str.replace(",", "", regex=False)
-            dataframe[column] = pd.to_numeric(values, errors="coerce").astype("Int64")
+    if "acta_id" in dataframe.columns:
+        dataframe["acta_id"] = dataframe["acta_id"].astype("string").fillna("").str.strip()
+    if "lote_id" in dataframe.columns:
+        values = dataframe["lote_id"].astype("string").str.strip()
+        values = values.str.replace(".", "", regex=False).str.replace(",", "", regex=False)
+        dataframe["lote_id"] = pd.to_numeric(values, errors="coerce").astype("Int64")
 
     dataframe["Fecha Lote"] = pd.to_datetime(
         dataframe["Fecha Lote"].astype("string").str.strip(),
@@ -618,6 +684,92 @@ transform_notifications_door_task = PythonOperator(
 fetch_actas_notificadas_task >> transform_notifications_door_task
 
 
+# ---- info extra bajo puerta ------------------------------------------------
+
+ACTAS_NOTIFICADAS_EXTRA_RAW = "/tmp/data/berisso/actas_notificadas_extra.parquet"
+NOTIFICATIONS_DOOR_EXTRA_CLEAN = "/tmp/data/berisso/notifications_door_extra_clean.parquet"
+
+
+def fetch_actas_notificadas_extra(**kwargs):
+    _fetch_csv(
+        "Actas Notificada bajo puerta info extra.csv",
+        ACTAS_NOTIFICADAS_EXTRA_RAW,
+        **kwargs,
+    )
+
+
+def transform_notifications_door_extra(**kwargs):
+    import pandas as pd
+
+    dataframe = pd.read_parquet(ACTAS_NOTIFICADAS_EXTRA_RAW)
+    dataframe = dataframe.rename(
+        columns={
+            "fe_vencimiento_pago_total": "Fecha de vencimiento de pago total",
+            "actas_notif": "Actas Notificadas",
+        }
+    )
+
+    dataframe["lote_id"] = pd.to_numeric(dataframe["lote_id"], errors="coerce").astype("Int64")
+    dataframe["Fecha de vencimiento de pago total"] = pd.to_datetime(
+        dataframe["Fecha de vencimiento de pago total"],
+        format="mixed",
+        errors="coerce",
+    ).dt.normalize()
+    dataframe["fecha_impresion"] = pd.to_datetime(
+        dataframe["fecha_impresion"],
+        format="mixed",
+        errors="coerce",
+    ).dt.normalize()
+    dataframe["Año"] = dataframe["Fecha de vencimiento de pago total"].dt.year.astype("Int64")
+    dataframe["Mes_num"] = dataframe["Fecha de vencimiento de pago total"].dt.month.astype("Int64")
+    dataframe["Mes"] = dataframe["Mes_num"].map(
+        {
+            1: "Enero",
+            2: "Febrero",
+            3: "Marzo",
+            4: "Abril",
+            5: "Mayo",
+            6: "Junio",
+            7: "Julio",
+            8: "Agosto",
+            9: "Septiembre",
+            10: "Octubre",
+            11: "Noviembre",
+            12: "Diciembre",
+        }
+    )
+    dataframe.to_parquet(NOTIFICATIONS_DOOR_EXTRA_CLEAN, index=False)
+
+
+def build_notifications_door_extra_detail(**kwargs):
+    import pandas as pd
+
+    pd.read_parquet(NOTIFICATIONS_DOOR_EXTRA_CLEAN).to_parquet(
+        _output_path("notification_door_extra_detail.parquet"),
+        index=False,
+    )
+
+
+fetch_actas_notificadas_extra_task = PythonOperator(
+    task_id="fetch_actas_notificadas_extra",
+    python_callable=fetch_actas_notificadas_extra,
+    dag=berisso_dag,
+)
+transform_notifications_door_extra_task = PythonOperator(
+    task_id="transform_notifications_door_extra",
+    python_callable=transform_notifications_door_extra,
+    dag=berisso_dag,
+)
+build_notifications_door_extra_detail_task = PythonOperator(
+    task_id="build_notifications_door_extra_detail",
+    python_callable=build_notifications_door_extra_detail,
+    dag=berisso_dag,
+)
+
+fetch_actas_notificadas_extra_task >> transform_notifications_door_extra_task
+transform_notifications_door_extra_task >> build_notifications_door_extra_detail_task
+
+
 # ---- actas notificadas email ---------------------------------------------
 
 ACTAS_NOTIFICADAS_EMAIL_RAW = "/tmp/data/berisso/actas_notificadas_email.parquet"
@@ -625,22 +777,7 @@ NOTIFICATIONS_EMAIL_CLEAN = "/tmp/data/berisso/notifications_email_clean.parquet
 
 
 def fetch_actas_notificadas_email(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("actas_notificadas_email").sheet1
-    values = worksheet.get_all_values()
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    dataframe.to_parquet(ACTAS_NOTIFICADAS_EMAIL_RAW, index=False)
+    _fetch_csv("Listado de actas notificadas email.csv", ACTAS_NOTIFICADAS_EMAIL_RAW, **kwargs)
 
 def transform_notifications_email(**kwargs):
     import pandas as pd
@@ -652,11 +789,12 @@ def transform_notifications_email(**kwargs):
         dataframe = dataframe.rename(columns={"numero_acta": "acta"})
 
     dataframe["acta"] = dataframe["acta"].astype("string").fillna("").str.strip()
-    for column in ["acta_id", "lote_id"]:
-        if column in dataframe.columns:
-            values = dataframe[column].astype("string").str.strip()
-            values = values.str.replace(".", "", regex=False).str.replace(",", "", regex=False)
-            dataframe[column] = pd.to_numeric(values, errors="coerce").astype("Int64")
+    if "acta_id" in dataframe.columns:
+        dataframe["acta_id"] = dataframe["acta_id"].astype("string").fillna("").str.strip()
+    if "lote_id" in dataframe.columns:
+        values = dataframe["lote_id"].astype("string").str.strip()
+        values = values.str.replace(".", "", regex=False).str.replace(",", "", regex=False)
+        dataframe["lote_id"] = pd.to_numeric(values, errors="coerce").astype("Int64")
 
     dataframe["Fecha Lote"] = pd.to_datetime(
         dataframe["Fecha Lote"].astype("string").str.strip(),
@@ -713,22 +851,7 @@ NIVEL5_FINAL = "/tmp/data/berisso/nivel5_final.parquet"
 
 
 def fetch_actividad_revisores(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("actividad_revisores").sheet1
-    values = worksheet.get_all_values()
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    dataframe.to_parquet(ACTIVIDAD_REVISORES_RAW, index=False)
+    _fetch_csv("Actividad_revisores_nivel_5.csv", ACTIVIDAD_REVISORES_RAW, **kwargs)
 
 def transform_nivel5(**kwargs):
     import pandas as pd
@@ -832,22 +955,7 @@ FALLOS_FINAL = "/tmp/data/berisso/fallos_final.parquet"
 
 
 def fetch_fallos(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("fallos").sheet1
-    values = worksheet.get_all_values()
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    dataframe.to_parquet(FALLOS_RAW, index=False)
+    _fetch_csv("Fallos.csv", FALLOS_RAW, **kwargs)
 
 def transform_fallos(**kwargs):
     import pandas as pd
@@ -991,14 +1099,14 @@ transform_payments_task >> join_notifications_payments_task
 def build_payments_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(PAYMENTS_CLEAN).to_parquet("/data/berisso/payments_detail.parquet", index=False)
+    pd.read_parquet(PAYMENTS_CLEAN).to_parquet(_output_path("payments_detail.parquet"), index=False)
 
 
 def build_generated_notifications_detail(**kwargs):
     import pandas as pd
 
     pd.read_parquet(GENERATED_NOTIFICATIONS_CLEAN).to_parquet(
-        "/data/berisso/generated_notifications.parquet",
+        _output_path("generated_notifications.parquet"),
         index=False,
     )
 
@@ -1006,26 +1114,26 @@ def build_generated_notifications_detail(**kwargs):
 def build_fallos_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(FALLOS_FINAL).to_parquet("/data/berisso/fallos_detail.parquet", index=False)
+    pd.read_parquet(FALLOS_FINAL).to_parquet(_output_path("fallos_detail.parquet"), index=False)
 
 
 def build_nivel5_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(NIVEL5_FINAL).to_parquet("/data/berisso/nivel5_detail.parquet", index=False)
+    pd.read_parquet(NIVEL5_FINAL).to_parquet(_output_path("nivel5_detail.parquet"), index=False)
 
 
 def build_notifications_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(NOTIFICATIONS_JOINED).to_parquet("/data/berisso/notifications_detail.parquet", index=False)
+    pd.read_parquet(NOTIFICATIONS_JOINED).to_parquet(_output_path("notifications_detail.parquet"), index=False)
 
 
 def build_notification_payments_detail(**kwargs):
     import pandas as pd
 
     pd.read_parquet(NOTIFICATION_PAYMENTS).to_parquet(
-        "/data/berisso/notification_payments_detail.parquet",
+        _output_path("notification_payments_detail.parquet"),
         index=False,
     )
 
@@ -1040,7 +1148,7 @@ def build_infraction_counts(**kwargs):
     ).agg(
         **{"Cantidad cometidas": ("Cantidad cometidas", "sum")}
     ).to_parquet(
-        "/data/berisso/infraction_counts.parquet",
+        _output_path("infraction_counts.parquet"),
         index=False,
     )
 
@@ -1049,7 +1157,7 @@ def build_camera_detail(**kwargs):
     import pandas as pd
 
     pd.read_parquet(INFRACTION_DETAIL_CLEAN).to_parquet(
-        "/data/berisso/camera_detail.parquet",
+        _output_path("camera_detail.parquet"),
         index=False,
     )
 
@@ -1114,7 +1222,7 @@ def build_dashboard_payments_daily(**kwargs):
     payments = pd.read_parquet(PAYMENTS_CLEAN)
     payments.groupby(["Fecha", "Año", "Mes", "Mes_num"], as_index=False).agg(
         **{"Actas pagadas": ("numero", "nunique")}
-    ).to_parquet("/data/berisso/dashboard_payments_daily.parquet", index=False)
+    ).to_parquet(_output_path("dashboard_payments_daily.parquet"), index=False)
 
 
 def build_dashboard_infractions_by_type(**kwargs):
@@ -1127,7 +1235,7 @@ def build_dashboard_infractions_by_type(**kwargs):
     ).agg(
         **{"Cantidad cometidas": ("Cantidad cometidas", "sum")}
     ).to_parquet(
-        "/data/berisso/dashboard_infractions_by_type.parquet",
+        _output_path("dashboard_infractions_by_type.parquet"),
         index=False,
     )
 
@@ -1142,7 +1250,7 @@ def build_dashboard_generated_by_type(**kwargs):
     ).agg(
         Generado=("Generado", "sum")
     ).to_parquet(
-        "/data/berisso/dashboard_generated_by_type.parquet",
+        _output_path("dashboard_generated_by_type.parquet"),
         index=False,
     )
 
@@ -1197,7 +1305,7 @@ def build_dashboard_monthly_metrics(**kwargs):
     )
     previous = previous.rename(columns={column: f"{column}_mes_anterior" for column in columns})
     dataframe.merge(previous, on="_periodo", how="left").drop(columns="_periodo").to_parquet(
-        "/data/berisso/dashboard_monthly_metrics.parquet",
+        _output_path("dashboard_monthly_metrics.parquet"),
         index=False,
     )
 
@@ -1239,7 +1347,7 @@ def build_payments_by_method_daily(**kwargs):
 
     payments = pd.read_parquet(PAYMENTS_CLEAN)
     payments.groupby(["Fecha", "medio_pago"], as_index=False).agg(Actas=("numero", "nunique")).to_parquet(
-        "/data/berisso/payments_by_method_daily.parquet",
+        _output_path("payments_by_method_daily.parquet"),
         index=False,
     )
 
@@ -1249,7 +1357,7 @@ def build_payments_daily(**kwargs):
 
     payments = pd.read_parquet(PAYMENTS_CLEAN)
     payments.groupby(["Fecha"], as_index=False).agg(Pagadas=("numero", "nunique")).to_parquet(
-        "/data/berisso/payments_daily.parquet",
+        _output_path("payments_daily.parquet"),
         index=False,
     )
 
@@ -1261,7 +1369,7 @@ def build_payments_monthly(**kwargs):
     payments.groupby(["Año", "Mes", "Mes_num"], as_index=False).agg(
         Actas_pagadas=("numero", "nunique"),
         Recaudado=("Monto Total", "sum"),
-    ).to_parquet("/data/berisso/payments_monthly.parquet", index=False)
+    ).to_parquet(_output_path("payments_monthly.parquet"), index=False)
 
 
 def build_camera_by_month_type(**kwargs):
@@ -1276,7 +1384,7 @@ def build_camera_by_month_type(**kwargs):
             "Cantidad cometidas": ("Cantidad cometidas", "sum"),
             "Generado": ("Generado", "sum"),
         }
-    ).to_parquet("/data/berisso/camera_by_month_type.parquet", index=False)
+    ).to_parquet(_output_path("camera_by_month_type.parquet"), index=False)
 
 
 def build_camera_by_month_total(**kwargs):
@@ -1292,7 +1400,7 @@ def build_camera_by_month_total(**kwargs):
             "Cantidad cometidas": ("Cantidad cometidas", "sum"),
             "Generado": ("Generado", "sum"),
         }
-    ).to_parquet("/data/berisso/camera_by_month_total.parquet", index=False)
+    ).to_parquet(_output_path("camera_by_month_total.parquet"), index=False)
 
 
 def build_camera_map(**kwargs):
@@ -1308,7 +1416,7 @@ def build_camera_map(**kwargs):
             "Cantidad cometidas": ("Cantidad cometidas", "sum"),
             "Generado": ("Generado", "sum"),
         }
-    ).to_parquet("/data/berisso/camera_map.parquet", index=False)
+    ).to_parquet(_output_path("camera_map.parquet"), index=False)
 
 
 build_payments_by_method_daily_task = PythonOperator(
@@ -1360,7 +1468,7 @@ def build_notifications_by_date_type(**kwargs):
     notifications.groupby(["Año", "Mes", "Mes_num", "Fecha Lote", "notific_type"], as_index=False).agg(
         Actas_notificadas=("acta", "nunique")
     ).rename(columns={"notific_type": "Tipo de Notificacion"}).to_parquet(
-        "/data/berisso/notifications_by_date_type.parquet",
+        _output_path("notifications_by_date_type.parquet"),
         index=False,
     )
 
@@ -1372,7 +1480,7 @@ def build_notifications_by_type_month(**kwargs):
     notifications.groupby(["Año", "Mes", "Mes_num", "notific_type"], as_index=False).agg(
         Actas_notificadas=("acta", "nunique")
     ).rename(columns={"notific_type": "Tipo de Notificacion"}).to_parquet(
-        "/data/berisso/notifications_by_type_month.parquet",
+        _output_path("notifications_by_type_month.parquet"),
         index=False,
     )
 
@@ -1394,7 +1502,7 @@ def build_lotes_daily_analytics(**kwargs):
         daily["Cantidad_de_Actas_Pagadas"] / daily["Cantidad_de_Actas_Enviadas"] * 100,
         0,
     )
-    daily.to_parquet("/data/berisso/lotes_daily_analytics.parquet", index=False)
+    daily.to_parquet(_output_path("lotes_daily_analytics.parquet"), index=False)
 
 
 def build_lotes_monthly_analytics(**kwargs):
@@ -1468,7 +1576,7 @@ def build_lotes_monthly_analytics(**kwargs):
         previous = previous.rename(columns={column: f"{column}_anterior" for column in previous_columns})
         monthly = monthly.merge(previous, on="_periodo", how="left").drop(columns="_periodo")
 
-    monthly.to_parquet("/data/berisso/lotes_monthly_analytics.parquet", index=False)
+    monthly.to_parquet(_output_path("lotes_monthly_analytics.parquet"), index=False)
 
 build_notifications_by_date_type_task = PythonOperator(
     task_id="build_notifications_by_date_type",
@@ -1505,7 +1613,7 @@ def build_fallos_daily_juzgado(**kwargs):
 
     fallos = pd.read_parquet(FALLOS_FINAL)
     fallos.groupby(["Fecha", "juzgado_id"], as_index=False).agg(Fallos_emitidos=("acta", "count")).to_parquet(
-        "/data/berisso/fallos_daily_juzgado.parquet",
+        _output_path("fallos_daily_juzgado.parquet"),
         index=False,
     )
 
@@ -1517,7 +1625,7 @@ def build_fallos_daily_tipo(**kwargs):
     fallos.groupby(["Fecha", "juzgado_id", "fallo"], as_index=False).agg(
         Emitidos=("acta", "nunique"),
         Reducido=("Reducido", "sum"),
-    ).to_parquet("/data/berisso/fallos_daily_tipo.parquet", index=False)
+    ).to_parquet(_output_path("fallos_daily_tipo.parquet"), index=False)
 
 
 def build_fallos_tipo_total(**kwargs):
@@ -1525,7 +1633,7 @@ def build_fallos_tipo_total(**kwargs):
 
     fallos = pd.read_parquet(FALLOS_FINAL)
     fallos.groupby(["fallo"], as_index=False).agg(Cantidad=("acta", "count")).to_parquet(
-        "/data/berisso/fallos_tipo_total.parquet",
+        _output_path("fallos_tipo_total.parquet"),
         index=False,
     )
 
@@ -1560,7 +1668,7 @@ def build_nivel5_daily_reviewer(**kwargs):
     nivel5 = pd.read_parquet(NIVEL5_FINAL)
     nivel5.groupby(["Fecha", "Auditor"], as_index=False).agg(
         {"Aceptadas": "sum", "Rechazadas": "sum", "Total": "sum"}
-    ).to_parquet("/data/berisso/nivel5_daily_reviewer.parquet", index=False)
+    ).to_parquet(_output_path("nivel5_daily_reviewer.parquet"), index=False)
 
 
 def build_nivel5_daily_camera(**kwargs):
@@ -1571,7 +1679,7 @@ def build_nivel5_daily_camera(**kwargs):
         {"Aceptadas": "sum", "Rechazadas": "sum"}
     ).rename(columns={"Código de cámara": "Ubicacion"})
     camera["Total"] = camera["Aceptadas"] + camera["Rechazadas"]
-    camera.to_parquet("/data/berisso/nivel5_daily_camera.parquet", index=False)
+    camera.to_parquet(_output_path("nivel5_daily_camera.parquet"), index=False)
 
 
 def build_nivel5_daily_result_detail(**kwargs):
@@ -1587,7 +1695,7 @@ def build_nivel5_daily_result_detail(**kwargs):
     )
     rejected["Resultado"] = "Rechazadas"
     pd.concat([accepted, rejected], ignore_index=True).to_parquet(
-        "/data/berisso/nivel5_daily_result_detail.parquet",
+        _output_path("nivel5_daily_result_detail.parquet"),
         index=False,
     )
 
@@ -1595,7 +1703,7 @@ def build_nivel5_daily_result_detail(**kwargs):
 def build_nivel5_daily_result(**kwargs):
     import pandas as pd
 
-    detail = pd.read_parquet("/data/berisso/nivel5_daily_result_detail.parquet")
+    detail = pd.read_parquet(_output_path("nivel5_daily_result_detail.parquet"))
     if detail.empty:
         result = pd.DataFrame(
             columns=["Fecha", "Resultado", "Presunciones de Nivel 5", "hover_text", "Total de la fecha"]
@@ -1622,7 +1730,7 @@ def build_nivel5_daily_result(**kwargs):
         )
         result = result.merge(totals, on="Fecha", how="left")
 
-    result.to_parquet("/data/berisso/nivel5_daily_result.parquet", index=False)
+    result.to_parquet(_output_path("nivel5_daily_result.parquet"), index=False)
 
 def build_nivel5_daily_metrics(**kwargs):
     import pandas as pd
@@ -1630,7 +1738,7 @@ def build_nivel5_daily_metrics(**kwargs):
     nivel5 = pd.read_parquet(NIVEL5_FINAL)
     nivel5.groupby(["Fecha"], as_index=False).agg(
         {"Total": "sum", "Aceptadas": "sum", "Rechazadas": "sum"}
-    ).to_parquet("/data/berisso/nivel5_daily_metrics.parquet", index=False)
+    ).to_parquet(_output_path("nivel5_daily_metrics.parquet"), index=False)
 
 
 build_nivel5_daily_reviewer_task = PythonOperator(
@@ -1664,3 +1772,56 @@ transform_nivel5_task >> build_nivel5_daily_camera_task
 transform_nivel5_task >> build_nivel5_daily_result_detail_task
 build_nivel5_daily_result_detail_task >> build_nivel5_daily_result_task
 transform_nivel5_task >> build_nivel5_daily_metrics_task
+
+check_berisso_sources_task >> [
+    fetch_actas_pagadas_task,
+    fetch_actas_enviadas_task,
+    fetch_detalles_infracciones_task,
+    fetch_actas_cantidad_task,
+    fetch_actas_notificadas_task,
+    fetch_actas_notificadas_extra_task,
+    fetch_actas_notificadas_email_task,
+    fetch_actividad_revisores_task,
+    fetch_fallos_task,
+]
+
+
+publish_berisso_dataset_task = PythonOperator(
+    task_id="publish_berisso_dataset",
+    python_callable=publish_berisso_dataset,
+    dag=berisso_dag,
+)
+
+[
+    build_payments_detail_task,
+    build_generated_notifications_detail_task,
+    build_fallos_detail_task,
+    build_nivel5_detail_task,
+    build_notifications_detail_task,
+    build_notification_payments_detail_task,
+    build_infraction_counts_task,
+    build_camera_detail_task,
+    build_notifications_door_extra_detail_task,
+    build_dashboard_payments_daily_task,
+    build_dashboard_infractions_by_type_task,
+    build_dashboard_generated_by_type_task,
+    build_dashboard_monthly_metrics_task,
+    build_payments_by_method_daily_task,
+    build_payments_daily_task,
+    build_payments_monthly_task,
+    build_camera_by_month_type_task,
+    build_camera_by_month_total_task,
+    build_camera_map_task,
+    build_notifications_by_date_type_task,
+    build_notifications_by_type_month_task,
+    build_lotes_daily_analytics_task,
+    build_lotes_monthly_analytics_task,
+    build_fallos_daily_juzgado_task,
+    build_fallos_daily_tipo_task,
+    build_fallos_tipo_total_task,
+    build_nivel5_daily_reviewer_task,
+    build_nivel5_daily_camera_task,
+    build_nivel5_daily_result_task,
+    build_nivel5_daily_metrics_task,
+] >> publish_berisso_dataset_task
+

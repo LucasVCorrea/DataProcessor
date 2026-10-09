@@ -100,7 +100,6 @@ services:
       AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     volumes:
       - uvcache:/.cache/uv
-      - airflowdags:/opt/airflow/dags
       - airflowlogs:/opt/airflow/logs
       - airflowconfig:/opt/airflow/config
       - airflowplugins:/opt/airflow/plugins
@@ -149,7 +148,6 @@ services:
       AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     volumes:
       - uvcache:/.cache/uv
-      - airflowdags:/opt/airflow/dags
       - airflowlogs:/opt/airflow/logs
       - airflowconfig:/opt/airflow/config
       - airflowplugins:/opt/airflow/plugins
@@ -197,7 +195,6 @@ services:
       AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     volumes:
       - uvcache:/.cache/uv
-      - airflowdags:/opt/airflow/dags
       - airflowlogs:/opt/airflow/logs
       - airflowconfig:/opt/airflow/config
       - airflowplugins:/opt/airflow/plugins
@@ -244,7 +241,6 @@ services:
       AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     volumes:
       - uvcache:/.cache/uv
-      - airflowdags:/opt/airflow/dags
       - airflowlogs:/opt/airflow/logs
       - airflowconfig:/opt/airflow/config
       - airflowplugins:/opt/airflow/plugins
@@ -300,7 +296,6 @@ services:
       AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     volumes:
       - uvcache:/.cache/uv
-      - airflowdags:/opt/airflow/dags
       - airflowlogs:/opt/airflow/logs
       - airflowconfig:/opt/airflow/config
       - airflowplugins:/opt/airflow/plugins
@@ -353,7 +348,6 @@ services:
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
     volumes:
       - uvcache:/.cache/uv
-      - airflowdags:/opt/airflow/dags
       - airflowlogs:/opt/airflow/logs
       - airflowconfig:/opt/airflow/config
       - airflowplugins:/opt/airflow/plugins
@@ -541,7 +535,6 @@ services:
 volumes:
   postgres-db-volume:
   airflowlogs:
-  airflowdags:
   airflowplugins:
   airflowconfig:
   uvcache:

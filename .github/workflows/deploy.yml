@@ -1,0 +1,66 @@
+name: Deploy DataProcessor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'projects/aset/berisso/**'
+      - 'base_workers/**'
+      - 'airflow_base/**'
+      - 'Dockerfile'
+      - 'docker-compose.production.yaml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.DATAPROCESSOR_ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+          docker build --target g-worker-base -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+      - name: Restart DataProcessor through SSM
+        env:
+          INSTANCE_ID: ${{ vars.DATAPROCESSOR_INSTANCE_ID }}
+          COMPOSE_DIR: ${{ vars.DATAPROCESSOR_COMPOSE_DIR }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          REGISTRY="${IMAGE_URI%%/*}"
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --parameters commands="[\
+              \"cd $COMPOSE_DIR\",\
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY\",\
+              \"DATAPROCESSOR_IMAGE=$IMAGE_URI docker compose -f docker-compose.production.yaml pull\",\
+              \"DATAPROCESSOR_IMAGE=$IMAGE_URI docker compose -f docker-compose.production.yaml up -d\"\
+            ]" \
+            --query 'Command.CommandId' \
+            --output text)
+
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"

@@ -18,7 +18,6 @@ berisso_dag = DAG(
 
 SOURCE_FILES = [
     "Actas Notificada bajo puerta info extra.csv",
-    "Actas enviadas al correo.csv",
     "Actas por Tipo de Infraccion.csv",
     "Actividad_revisores_nivel_5.csv",
     "Detalle de actas pagas.csv",
@@ -26,6 +25,39 @@ SOURCE_FILES = [
     "Listado de actas notificadas email.csv",
     "Listado de actas notificadas.csv",
     "detalles_de_infracciones.csv",
+]
+
+PUBLISHED_FILES = [
+    "camera_by_month_total.parquet",
+    "camera_by_month_type.parquet",
+    "camera_detail.parquet",
+    "camera_map.parquet",
+    "dashboard_generated_by_type.parquet",
+    "dashboard_infractions_by_type.parquet",
+    "dashboard_monthly_metrics.parquet",
+    "dashboard_payments_daily.parquet",
+    "fallos_daily_juzgado.parquet",
+    "fallos_daily_tipo.parquet",
+    "fallos_detail.parquet",
+    "fallos_tipo_total.parquet",
+    "infraction_counts.parquet",
+    "lotes_daily_analytics.parquet",
+    "lotes_monthly_analytics.parquet",
+    "nivel5_daily_camera.parquet",
+    "nivel5_daily_metrics.parquet",
+    "nivel5_daily_result.parquet",
+    "nivel5_daily_result_detail.parquet",
+    "nivel5_daily_reviewer.parquet",
+    "nivel5_detail.parquet",
+    "notification_door_extra_detail.parquet",
+    "notification_payments_detail.parquet",
+    "notifications_by_date_type.parquet",
+    "notifications_by_type_month.parquet",
+    "notifications_detail.parquet",
+    "payments_by_method_daily.parquet",
+    "payments_daily.parquet",
+    "payments_detail.parquet",
+    "payments_monthly.parquet",
 ]
 
 
@@ -79,6 +111,7 @@ def _save_state(file_name, payload):
 def _fetch_csv(file_name, target_path, low_memory=False, **kwargs):
     from google_worker.drive_csv import read_csv
 
+    Path(target_path).parent.mkdir(parents=True, exist_ok=True)
     manifest = kwargs["ti"].xcom_pull(task_ids="check_berisso_sources") or {}
     file_id = manifest.get(file_name, {}).get("id")
     dataframe = read_csv(
@@ -117,8 +150,11 @@ def publish_berisso_dataset(**kwargs):
         version_prefix = f"{prefix}/versions/{version}"
         client = boto3.client("s3")
         output_dir = Path(os.getenv("BERISSO_DATA_DIR", "/data/berisso"))
-        for path in sorted(output_dir.glob("*.parquet")):
-            client.upload_file(str(path), bucket, f"{version_prefix}/{path.name}")
+        for file_name in PUBLISHED_FILES:
+            path = output_dir / file_name
+            if not path.exists():
+                raise FileNotFoundError(f"No se generó el output esperado: {path}")
+            client.upload_file(str(path), bucket, f"{version_prefix}/{file_name}")
         dataset_manifest["prefix"] = version_prefix
 
     _save_state("_dataset_manifest.json", dataset_manifest)
@@ -243,71 +279,6 @@ transform_payments_task = PythonOperator(
     dag=berisso_dag,
 )
 fetch_actas_pagadas_task >> transform_payments_task
-
-
-# ---- actas enviadas --------------------------------------------------------
-
-ACTAS_ENVIADAS_RAW = "/tmp/data/berisso/actas_enviadas.parquet"
-GENERATED_NOTIFICATIONS_CLEAN = "/tmp/data/berisso/generated_notifications_clean.parquet"
-
-
-def fetch_actas_enviadas(**kwargs):
-    _fetch_csv("Actas enviadas al correo.csv", ACTAS_ENVIADAS_RAW, **kwargs)
-
-def transform_generated_notifications(**kwargs):
-    import pandas as pd
-
-    dataframe = pd.read_parquet(ACTAS_ENVIADAS_RAW)
-
-    for column in ["Actas Generadas", "Actas Impresas"]:
-        if column not in dataframe.columns:
-            dataframe[column] = 0
-        values = dataframe[column].astype("string").str.strip()
-        values = values.str.replace(".", "", regex=False).str.replace(",", "", regex=False)
-        dataframe[column] = pd.to_numeric(values, errors="coerce").fillna(0).astype("int64")
-
-    month = pd.to_datetime(
-        dataframe["month"].astype("string").str.strip(),
-        format="%Y-%m",
-        errors="coerce",
-    )
-    current_month = pd.Timestamp.now(
-        tz="America/Argentina/Buenos_Aires"
-    ).tz_localize(None).to_period("M").to_timestamp()
-    dataframe = dataframe.loc[month.notna() & (month <= current_month)]
-    month = month.loc[dataframe.index]
-    dataframe["Año"] = month.dt.year.astype("int64")
-    dataframe["Mes_num"] = month.dt.month.astype("int64")
-    dataframe["Mes"] = dataframe["Mes_num"].map(
-        {
-            1: "Enero",
-            2: "Febrero",
-            3: "Marzo",
-            4: "Abril",
-            5: "Mayo",
-            6: "Junio",
-            7: "Julio",
-            8: "Agosto",
-            9: "Septiembre",
-            10: "Octubre",
-            11: "Noviembre",
-            12: "Diciembre",
-        }
-    )
-    dataframe.sort_values(["Año", "Mes_num"]).to_parquet(GENERATED_NOTIFICATIONS_CLEAN, index=False)
-
-fetch_actas_enviadas_task = PythonOperator(
-    task_id="fetch_actas_enviadas",
-    python_callable=fetch_actas_enviadas,
-    dag=berisso_dag,
-)
-transform_generated_notifications_task = PythonOperator(
-    task_id="transform_generated_notifications",
-    python_callable=transform_generated_notifications,
-    dag=berisso_dag,
-)
-fetch_actas_enviadas_task >> transform_generated_notifications_task
-
 
 
 # ---- detalles infracciones -------------------------------------------------
@@ -1102,15 +1073,6 @@ def build_payments_detail(**kwargs):
     pd.read_parquet(PAYMENTS_CLEAN).to_parquet(_output_path("payments_detail.parquet"), index=False)
 
 
-def build_generated_notifications_detail(**kwargs):
-    import pandas as pd
-
-    pd.read_parquet(GENERATED_NOTIFICATIONS_CLEAN).to_parquet(
-        _output_path("generated_notifications.parquet"),
-        index=False,
-    )
-
-
 def build_fallos_detail(**kwargs):
     import pandas as pd
 
@@ -1167,11 +1129,6 @@ build_payments_detail_task = PythonOperator(
     python_callable=build_payments_detail,
     dag=berisso_dag,
 )
-build_generated_notifications_detail_task = PythonOperator(
-    task_id="build_generated_notifications_detail",
-    python_callable=build_generated_notifications_detail,
-    dag=berisso_dag,
-)
 build_fallos_detail_task = PythonOperator(
     task_id="build_fallos_detail",
     python_callable=build_fallos_detail,
@@ -1204,7 +1161,6 @@ build_camera_detail_task = PythonOperator(
 )
 
 transform_payments_task >> build_payments_detail_task
-transform_generated_notifications_task >> build_generated_notifications_detail_task
 transform_fallos_task >> build_fallos_detail_task
 transform_nivel5_task >> build_nivel5_detail_task
 join_notifications_task >> build_notifications_detail_task
@@ -1259,8 +1215,9 @@ def build_dashboard_monthly_metrics(**kwargs):
     import pandas as pd
 
     payments = pd.read_parquet(PAYMENTS_CLEAN)
-    generated = pd.read_parquet(GENERATED_NOTIFICATIONS_CLEAN)
+    counts = pd.read_parquet(ACTAS_CANTIDAD_CLEAN)
     camera = pd.read_parquet(INFRACTION_DETAIL_CLEAN)
+    notifications = pd.read_parquet(NOTIFICATIONS_JOINED)
 
     monthly_payments = payments.groupby(["Año", "Mes", "Mes_num"], as_index=False).agg(
         Recaudado=("Monto Total", "sum"),
@@ -1269,14 +1226,27 @@ def build_dashboard_monthly_metrics(**kwargs):
         Actas_pagadas=("numero", "nunique"),
     )
     monthly_generated = camera.groupby(["Año", "Mes", "Mes_num"], as_index=False).agg(
-        Generado=("Generado", "sum")
+        Generado=("Generado", "sum"),
     )
-    monthly_notifications = generated.groupby(["Año", "Mes", "Mes_num"], as_index=False).agg(
-        Actas_Generadas=("Actas Generadas", "sum"),
-        Actas_Notificadas=("Actas Impresas", "sum"),
+    monthly_generated_count = counts.groupby(
+        ["Año", "Mes", "Mes_num"],
+        as_index=False,
+    ).agg(
+        Actas_Generadas=("Cantidad cometidas", "sum"),
     )
+    monthly_notifications = notifications.groupby(
+        ["Año", "Mes", "Mes_num"],
+        as_index=False,
+    ).agg(
+        Actas_Notificadas=("acta_id", "nunique"),
+    )
+
     dataframe = monthly_payments.merge(
         monthly_generated,
+        on=["Año", "Mes", "Mes_num"],
+        how="outer",
+    ).merge(
+        monthly_generated_count,
         on=["Año", "Mes", "Mes_num"],
         how="outer",
     ).merge(
@@ -1335,7 +1305,7 @@ transform_payments_task >> build_dashboard_payments_daily_task
 transform_actas_cantidad_task >> build_dashboard_infractions_by_type_task
 join_infraction_data_task >> build_dashboard_generated_by_type_task
 transform_payments_task >> build_dashboard_monthly_metrics_task
-transform_generated_notifications_task >> build_dashboard_monthly_metrics_task
+join_notifications_task >> build_dashboard_monthly_metrics_task
 join_infraction_data_task >> build_dashboard_monthly_metrics_task
 
 
@@ -1775,7 +1745,6 @@ transform_nivel5_task >> build_nivel5_daily_metrics_task
 
 check_berisso_sources_task >> [
     fetch_actas_pagadas_task,
-    fetch_actas_enviadas_task,
     fetch_detalles_infracciones_task,
     fetch_actas_cantidad_task,
     fetch_actas_notificadas_task,
@@ -1794,7 +1763,6 @@ publish_berisso_dataset_task = PythonOperator(
 
 [
     build_payments_detail_task,
-    build_generated_notifications_detail_task,
     build_fallos_detail_task,
     build_nivel5_detail_task,
     build_notifications_detail_task,

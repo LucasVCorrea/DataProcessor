@@ -3,6 +3,8 @@ fetch_valores_uf > transform_valores_uf
 fetch_motivos_rechazos > transform_motivos_rechazos
 fetch_tiempo_revision > transform_tiempo_revision
 fetch_imagenes_pendientes > transform_imagenes_pendientes
+fetch_historial_pendientes > transform_historial_pendientes
+fetch_reportes_camaras > transform_reportes_camaras
 transform_actividad_revisores > join_activity_uf
 transform_valores_uf > join_activity_uf
 transform_actividad_revisores > join_activity_review_time
@@ -11,8 +13,6 @@ join_activity_uf > build_activity_reviewers_detail
 transform_motivos_rechazos > build_rejection_reasons_detail
 transform_tiempo_revision > build_review_time_detail
 transform_imagenes_pendientes > build_pending_images_detail
-join_activity_review_time > build_reviewer_hourly_detail
-fetch_reportes_camaras > transform_reportes_camaras
+transform_imagenes_pendientes + transform_historial_pendientes > build_pending_images_history_detail
 transform_reportes_camaras > build_camera_reports_detail
-fetch_historial_accesos > transform_historial_accesos
-transform_historial_accesos > build_access_history_detail
+join_activity_review_time > build_reviewer_hourly_detail

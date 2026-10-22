@@ -7,4 +7,5 @@ dependencies = [
     "oauth2client",
     "pandas",
     "pyarrow",
+    "openpyxl",
 ]

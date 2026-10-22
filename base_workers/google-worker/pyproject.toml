@@ -10,7 +10,8 @@ dependencies = [
     "gspread",
     "oauth2client",
     "google-auth",
-    "boto3"
+    "boto3",
+    "openpyxl",
 ]
 
 [tool.uv.sources]

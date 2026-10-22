@@ -1,15 +1,291 @@
 import datetime
+import json
+import os
+from pathlib import Path
 
 from airflow.sdk import DAG
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator, ShortCircuitOperator
 from google_worker import GdriveLimitedPythonOperator
 
 
 transito_dag = DAG(
     dag_id="transito_dag",
-    start_date=datetime.datetime.now(),
+    start_date=datetime.datetime(2026, 8, 25),
     catchup=False,
-    schedule="@hourly",
+    max_active_runs=1,
+    schedule="* * * * *",
+)
+
+
+# Tessa conserva el nombre interno ``transito`` para no romper imports ni rutas
+# históricas, pero publica su dataset en processed/tessa y se sirve en /tessa/.
+DEFAULT_TESSA_DRIVE_FOLDER_ID = "1w-r6aZAX5oGqyPjSHO1SMS4XunAbIFEu"
+
+SOURCE_ALIASES = {
+    "actividad_revisores": [
+        "01-Actividad de revisores.xlsx",
+        "actividad_revisores_t.xlsx",
+        "actividad_revisores.xlsx",
+        "actividad_revisores_t",
+        "actividad_revisores",
+    ],
+    "valores_uf": [
+        "valores ufs (1).xlsx",
+        "valores_uf.xlsx",
+        "valores_ufs.xlsx",
+        "valores_uf",
+    ],
+    "motivos_rechazos": [
+        "02-Motivos de rechazo.xlsx",
+        "motivos_rechazos.xlsx",
+        "motivos_rechazos",
+    ],
+    "tiempo_revision": [
+        "03-Tiempo de revisión.xlsx",
+        "03-Tiempo de revision.xlsx",
+        "tiempo_revision.xlsx",
+        "tiempo_revision",
+    ],
+    "imagenes_pendientes": [
+        "Pendientes.csv",
+        "Pendientes.xlsx",
+        "imagenes_pendientes.xlsx",
+        "imagenes_pendientes",
+    ],
+    "reportes_camaras": [
+        "Reportes_camaras.csv",
+        "reportes_camaras.csv",
+        "Reportes_camaras.xlsx",
+        "reportes_camaras.xlsx",
+        "reportes_camaras",
+    ],
+    "historial_pendientes": [
+        "historial_completo.csv",
+        "historial_completo.xlsx",
+    ],
+}
+
+SOURCE_ENV_VARS = {
+    "actividad_revisores": "TESSA_SOURCE_ACTIVIDAD_REVISORES",
+    "valores_uf": "TESSA_SOURCE_VALORES_UF",
+    "motivos_rechazos": "TESSA_SOURCE_MOTIVOS_RECHAZOS",
+    "tiempo_revision": "TESSA_SOURCE_TIEMPO_REVISION",
+    "imagenes_pendientes": "TESSA_SOURCE_IMAGENES_PENDIENTES",
+    "reportes_camaras": "TESSA_SOURCE_REPORTES_CAMARAS",
+    "historial_pendientes": "TESSA_SOURCE_HISTORIAL_PENDIENTES",
+}
+
+PUBLISHED_FILES = [
+    "activity_reviewers_detail.parquet",
+    "rejection_reasons_detail.parquet",
+    "review_time_detail.parquet",
+    "pending_images_detail.parquet",
+    "pending_images_history_detail.parquet",
+    "camera_reports_detail.parquet",
+    "reviewer_hourly_detail.parquet",
+]
+
+def _bucket():
+    # Reutiliza el bucket ya configurado para Berisso salvo que Tessa indique otro.
+    return os.getenv("TESSA_S3_BUCKET") or os.getenv("BERISSO_S3_BUCKET")
+
+
+def _output_path(file_name):
+    output_dir = Path(os.getenv("TESSA_DATA_DIR", "/data/transito"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir / file_name)
+
+
+def _state_key(file_name):
+    prefix = os.getenv("TESSA_S3_PREFIX", "processed/tessa").strip("/")
+    return f"{prefix}/{file_name}"
+
+
+def _load_state(file_name):
+    bucket = _bucket()
+    if bucket:
+        import boto3
+        from botocore.exceptions import ClientError
+
+        try:
+            response = boto3.client("s3").get_object(Bucket=bucket, Key=_state_key(file_name))
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return None
+            raise
+        return json.loads(response["Body"].read())
+
+    path = Path(_output_path(file_name))
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _save_state(file_name, payload):
+    bucket = _bucket()
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
+    if bucket:
+        import boto3
+
+        boto3.client("s3").put_object(
+            Bucket=bucket,
+            Key=_state_key(file_name),
+            Body=serialized.encode("utf-8"),
+            ContentType="application/json",
+        )
+        return
+
+    Path(_output_path(file_name)).write_text(serialized, encoding="utf-8")
+
+
+
+def _load_previous_published_parquet(file_name):
+    import pandas as pd
+
+    bucket = _bucket()
+    if bucket:
+        import boto3
+        from botocore.exceptions import ClientError
+
+        manifest = _load_state("_dataset_manifest.json") or {}
+        prefix = (manifest.get("prefix") or "").strip("/")
+        if not prefix:
+            return pd.DataFrame()
+        try:
+            response = boto3.client("s3").get_object(
+                Bucket=bucket,
+                Key=f"{prefix}/{file_name}",
+            )
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return pd.DataFrame()
+            raise
+        from io import BytesIO
+
+        return pd.read_parquet(BytesIO(response["Body"].read()))
+
+    path = Path(_output_path(file_name))
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+def _tessa_data_folder_id():
+    from google_worker.drive_csv import list_folder, resolve_folder_path
+
+    root_folder_id = os.getenv("TESSA_DRIVE_FOLDER_ID", DEFAULT_TESSA_DRIVE_FOLDER_ID)
+    relative_path = os.getenv("TESSA_DRIVE_DATA_PATH", "").strip("/\\")
+    if not relative_path:
+        return root_folder_id
+
+    # El dashboard histórico usaba directamente la carpeta raíz. El fallback permite
+    # seguir funcionando si data_files todavía no existe o si el ID ya apunta a ella.
+    try:
+        return resolve_folder_path(root_folder_id, relative_path)
+    except FileNotFoundError:
+        list_folder(root_folder_id)  # valida acceso y conserva un error útil si no existe
+        return root_folder_id
+
+
+def _resolve_source_manifest():
+    from google_worker.drive_csv import list_folder
+
+    folder_id = _tessa_data_folder_id()
+    files = list_folder(folder_id)
+    manifest = {}
+
+    for logical_name, aliases in SOURCE_ALIASES.items():
+        override = os.getenv(SOURCE_ENV_VARS[logical_name])
+        candidates = [override] if override else []
+        candidates.extend(name for name in aliases if name not in candidates)
+        selected = next((name for name in candidates if name in files), None)
+        if selected is None:
+            raise FileNotFoundError(
+                f"No se encontró la fuente {logical_name!r} en Drive. "
+                f"Nombres aceptados: {', '.join(candidates)}"
+            )
+
+        item = files[selected]
+        manifest[logical_name] = {
+            "name": selected,
+            "id": item["id"],
+            "mimeType": item.get("mimeType"),
+            "modifiedTime": item.get("modifiedTime"),
+            "md5Checksum": item.get("md5Checksum"),
+            "size": item.get("size"),
+            "folder_id": folder_id,
+        }
+
+    return manifest
+
+
+def check_tessa_sources(**kwargs):
+    current = _resolve_source_manifest()
+    previous = _load_state("_source_manifest.json")
+    if current == previous:
+        return False
+    return current
+
+
+def _fetch_source(logical_name, target_path, **kwargs):
+    from google_worker.drive_csv import read_csv, read_excel
+
+    Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+    manifest = kwargs["ti"].xcom_pull(task_ids="check_tessa_sources") or {}
+    source = manifest.get(logical_name)
+    if not source:
+        raise RuntimeError(f"No se encontró {logical_name!r} en el manifest de Tessa")
+
+    file_name = source["name"]
+    if file_name.lower().endswith(".csv"):
+        dataframe = read_csv(
+            file_name,
+            file_id=source["id"],
+            dtype="string",
+        )
+    else:
+        dataframe = read_excel(
+            file_name,
+            file_id=source["id"],
+            mime_type=source.get("mimeType"),
+            dtype="string",
+        )
+
+    dataframe.to_parquet(target_path, index=False)
+
+
+def publish_tessa_dataset(**kwargs):
+    source_manifest = kwargs["ti"].xcom_pull(task_ids="check_tessa_sources")
+    now = datetime.datetime.now(datetime.UTC)
+    version = now.strftime("%Y%m%dT%H%M%S%fZ")
+    dataset_manifest = {
+        "version": version,
+        "updated_at": now.isoformat(),
+        "source": source_manifest,
+    }
+
+    bucket = _bucket()
+    if bucket:
+        import boto3
+
+        prefix = os.getenv("TESSA_S3_PREFIX", "processed/tessa").strip("/")
+        version_prefix = f"{prefix}/versions/{version}"
+        client = boto3.client("s3")
+        output_dir = Path(os.getenv("TESSA_DATA_DIR", "/data/transito"))
+        for file_name in PUBLISHED_FILES:
+            path = output_dir / file_name
+            if not path.exists():
+                raise FileNotFoundError(f"No se generó el output esperado: {path}")
+            client.upload_file(str(path), bucket, f"{version_prefix}/{file_name}")
+        dataset_manifest["prefix"] = version_prefix
+
+    _save_state("_dataset_manifest.json", dataset_manifest)
+    _save_state("_source_manifest.json", source_manifest)
+
+
+check_tessa_sources_task = ShortCircuitOperator(
+    task_id="check_tessa_sources",
+    python_callable=check_tessa_sources,
+    dag=transito_dag,
 )
 
 
@@ -20,24 +296,7 @@ ACTIVIDAD_REVISORES_CLEAN = "/tmp/data/transito/actividad_revisores_clean.parque
 
 
 def fetch_actividad_revisores(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("actividad_revisores_t").sheet1
-    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    if not dataframe.empty:
-        dataframe = dataframe.astype("string")
-    dataframe.to_parquet(ACTIVIDAD_REVISORES_RAW, index=False)
+    _fetch_source("actividad_revisores", ACTIVIDAD_REVISORES_RAW, **kwargs)
 
 
 def transform_actividad_revisores(**kwargs):
@@ -268,24 +527,7 @@ VALORES_UF_CLEAN = "/tmp/data/transito/valores_uf_clean.parquet"
 
 
 def fetch_valores_uf(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("valores_uf").sheet1
-    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    if not dataframe.empty:
-        dataframe = dataframe.astype("string")
-    dataframe.to_parquet(VALORES_UF_RAW, index=False)
+    _fetch_source("valores_uf", VALORES_UF_RAW, **kwargs)
 
 
 def transform_valores_uf(**kwargs):
@@ -354,24 +596,7 @@ MOTIVOS_RECHAZOS_CLEAN = "/tmp/data/transito/motivos_rechazos_clean.parquet"
 
 
 def fetch_motivos_rechazos(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("motivos_rechazos").sheet1
-    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    if not dataframe.empty:
-        dataframe = dataframe.astype("string")
-    dataframe.to_parquet(MOTIVOS_RECHAZOS_RAW, index=False)
+    _fetch_source("motivos_rechazos", MOTIVOS_RECHAZOS_RAW, **kwargs)
 
 
 def transform_motivos_rechazos(**kwargs):
@@ -566,24 +791,7 @@ TIEMPO_REVISION_CLEAN = "/tmp/data/transito/tiempo_revision_clean.parquet"
 
 
 def fetch_tiempo_revision(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("tiempo_revision").sheet1
-    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    if not dataframe.empty:
-        dataframe = dataframe.astype("string")
-    dataframe.to_parquet(TIEMPO_REVISION_RAW, index=False)
+    _fetch_source("tiempo_revision", TIEMPO_REVISION_RAW, **kwargs)
 
 
 def transform_tiempo_revision(**kwargs):
@@ -725,24 +933,7 @@ IMAGENES_PENDIENTES_CLEAN = "/tmp/data/transito/imagenes_pendientes_clean.parque
 
 
 def fetch_imagenes_pendientes(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("imagenes_pendientes").sheet1
-    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    if not dataframe.empty:
-        dataframe = dataframe.astype("string")
-    dataframe.to_parquet(IMAGENES_PENDIENTES_RAW, index=False)
+    _fetch_source("imagenes_pendientes", IMAGENES_PENDIENTES_RAW, **kwargs)
 
 
 def transform_imagenes_pendientes(**kwargs):
@@ -802,6 +993,71 @@ transform_imagenes_pendientes_task = PythonOperator(
 fetch_imagenes_pendientes_task >> transform_imagenes_pendientes_task
 
 
+# ---- historial de imagenes pendientes -------------------------------------
+
+HISTORIAL_PENDIENTES_RAW = "/tmp/data/transito/historial_pendientes.parquet"
+HISTORIAL_PENDIENTES_CLEAN = "/tmp/data/transito/historial_pendientes_clean.parquet"
+
+
+def fetch_historial_pendientes(**kwargs):
+    _fetch_source("historial_pendientes", HISTORIAL_PENDIENTES_RAW, **kwargs)
+
+
+def transform_historial_pendientes(**kwargs):
+    import pandas as pd
+
+    dataframe = pd.read_parquet(HISTORIAL_PENDIENTES_RAW).rename(
+        columns={"client": "Cliente", "status": "Estado", "count": "Cantidad"}
+    )
+    required_columns = {"Cliente", "Estado", "Cantidad", "tipo", "Tiempo"}
+    missing_columns = required_columns.difference(dataframe.columns)
+    if missing_columns:
+        raise ValueError(
+            "historial_pendientes no contiene las columnas requeridas: "
+            + ", ".join(sorted(missing_columns))
+        )
+
+    dataframe["Cliente"] = (
+        dataframe["Cliente"].astype("string").fillna("").str.strip().str.capitalize()
+    )
+    dataframe["Estado"] = (
+        dataframe["Estado"].astype("string").fillna("").str.strip().str.capitalize()
+    )
+    dataframe["tipo"] = (
+        dataframe["tipo"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.replace(r"^\[\d+\]\s*", "", regex=True)
+    )
+    dataframe["Cantidad"] = pd.to_numeric(
+        dataframe["Cantidad"].astype("string").str.replace(",", ".", regex=False),
+        errors="coerce",
+    ).fillna(0).round().astype("int64")
+    dataframe["Tiempo"] = pd.to_datetime(
+        dataframe["Tiempo"],
+        format="mixed",
+        errors="coerce",
+    )
+    dataframe = dataframe.loc[dataframe["Tiempo"].notna()]
+    dataframe[["Cliente", "tipo", "Estado", "Cantidad", "Tiempo"]].drop_duplicates().sort_values(
+        ["Tiempo", "Cliente", "Estado", "tipo"]
+    ).to_parquet(HISTORIAL_PENDIENTES_CLEAN, index=False)
+
+
+fetch_historial_pendientes_task = GdriveLimitedPythonOperator(
+    task_id="fetch_historial_pendientes",
+    python_callable=fetch_historial_pendientes,
+    dag=transito_dag,
+)
+transform_historial_pendientes_task = PythonOperator(
+    task_id="transform_historial_pendientes",
+    python_callable=transform_historial_pendientes,
+    dag=transito_dag,
+)
+fetch_historial_pendientes_task >> transform_historial_pendientes_task
+
+
 # ---- reportes de camaras ---------------------------------------------------
 
 REPORTES_CAMARAS_RAW = "/tmp/data/transito/reportes_camaras.parquet"
@@ -809,24 +1065,7 @@ REPORTES_CAMARAS_CLEAN = "/tmp/data/transito/reportes_camaras_clean.parquet"
 
 
 def fetch_reportes_camaras(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("reportes_camaras").sheet1
-    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    if not dataframe.empty:
-        dataframe = dataframe.astype("string")
-    dataframe.to_parquet(REPORTES_CAMARAS_RAW, index=False)
+    _fetch_source("reportes_camaras", REPORTES_CAMARAS_RAW, **kwargs)
 
 
 def transform_reportes_camaras(**kwargs):
@@ -921,99 +1160,6 @@ transform_reportes_camaras_task = PythonOperator(
 fetch_reportes_camaras_task >> transform_reportes_camaras_task
 
 
-# ---- historial de accesos --------------------------------------------------
-
-HISTORIAL_ACCESOS_RAW = "/tmp/data/transito/historial_accesos.parquet"
-HISTORIAL_ACCESOS_CLEAN = "/tmp/data/transito/historial_accesos_clean.parquet"
-
-
-def fetch_historial_accesos(**kwargs):
-    import gspread
-    import pandas as pd
-    from oauth2client.service_account import ServiceAccountCredentials
-
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        "/credentials/credentials.json",
-        [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    client = gspread.authorize(credentials)
-    worksheet = client.open("historial_accesos").sheet1
-    values = worksheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    dataframe = pd.DataFrame(values[1:], columns=values[0]) if values else pd.DataFrame()
-    if not dataframe.empty:
-        dataframe = dataframe.astype("string")
-    dataframe.to_parquet(HISTORIAL_ACCESOS_RAW, index=False)
-
-
-def transform_historial_accesos(**kwargs):
-    import pandas as pd
-
-    dataframe = pd.read_parquet(HISTORIAL_ACCESOS_RAW)
-    dataframe.columns = dataframe.columns.str.strip()
-    dataframe = dataframe.rename(
-        columns={
-            "Fecha y hora": "Fecha y Hora",
-            "Fecha Hora": "Fecha y Hora",
-        }
-    )
-
-    required_columns = {"Nombre", "Usuario", "Rol", "Fecha y Hora"}
-    missing_columns = required_columns.difference(dataframe.columns)
-    if missing_columns:
-        raise ValueError(
-            "historial_accesos no contiene las columnas requeridas: "
-            + ", ".join(sorted(missing_columns))
-        )
-
-    for column in ["Nombre", "Usuario", "Rol"]:
-        dataframe[column] = (
-            dataframe[column].astype("string").fillna("").str.strip()
-        )
-
-    values = dataframe["Fecha y Hora"].astype("string").str.strip()
-    numeric_values = pd.to_numeric(values, errors="coerce")
-    excel_serial = numeric_values.between(
-        20000, 80000, inclusive="both"
-    ).fillna(False)
-    parsed_text = pd.to_datetime(
-        values.where(~excel_serial),
-        format="mixed",
-        dayfirst=True,
-        errors="coerce",
-    )
-    parsed_serial = pd.to_datetime(
-        numeric_values.where(excel_serial),
-        unit="D",
-        origin="1899-12-30",
-        errors="coerce",
-    )
-    dataframe["Fecha y Hora"] = parsed_text.fillna(parsed_serial)
-    dataframe = dataframe.loc[dataframe["Fecha y Hora"].notna()]
-
-    dataframe[
-        ["Nombre", "Usuario", "Rol", "Fecha y Hora"]
-    ].drop_duplicates().sort_values("Fecha y Hora").to_parquet(
-        HISTORIAL_ACCESOS_CLEAN,
-        index=False,
-    )
-
-
-fetch_historial_accesos_task = GdriveLimitedPythonOperator(
-    task_id="fetch_historial_accesos",
-    python_callable=fetch_historial_accesos,
-    dag=transito_dag,
-)
-transform_historial_accesos_task = PythonOperator(
-    task_id="transform_historial_accesos",
-    python_callable=transform_historial_accesos,
-    dag=transito_dag,
-)
-fetch_historial_accesos_task >> transform_historial_accesos_task
-
-
 # ---- joins ----------------------------------------------------------------
 
 ACTIVITY_UF_CLEAN = "/tmp/data/transito/activity_uf_clean.parquet"
@@ -1098,11 +1244,24 @@ transform_tiempo_revision_task >> join_activity_review_time_task
 # ---- final datasets -------------------------------------------------------
 
 
+
+
+def _prepare_for_publish(dataframe):
+    """Persist stable scalar dtypes; ordering categories belong in the UI layer."""
+    import pandas as pd
+
+    dataframe = dataframe.copy()
+    for column in dataframe.columns:
+        if isinstance(dataframe[column].dtype, pd.CategoricalDtype):
+            dataframe[column] = dataframe[column].astype("string")
+    return dataframe
+
+
 def build_activity_reviewers_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(ACTIVITY_UF_CLEAN).to_parquet(
-        "/data/transito/activity_reviewers_detail.parquet",
+    _prepare_for_publish(pd.read_parquet(ACTIVITY_UF_CLEAN)).to_parquet(
+        _output_path("activity_reviewers_detail.parquet"),
         index=False,
     )
 
@@ -1110,8 +1269,8 @@ def build_activity_reviewers_detail(**kwargs):
 def build_rejection_reasons_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(MOTIVOS_RECHAZOS_CLEAN).to_parquet(
-        "/data/transito/rejection_reasons_detail.parquet",
+    _prepare_for_publish(pd.read_parquet(MOTIVOS_RECHAZOS_CLEAN)).to_parquet(
+        _output_path("rejection_reasons_detail.parquet"),
         index=False,
     )
 
@@ -1119,8 +1278,8 @@ def build_rejection_reasons_detail(**kwargs):
 def build_review_time_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(TIEMPO_REVISION_CLEAN).to_parquet(
-        "/data/transito/review_time_detail.parquet",
+    _prepare_for_publish(pd.read_parquet(TIEMPO_REVISION_CLEAN)).to_parquet(
+        _output_path("review_time_detail.parquet"),
         index=False,
     )
 
@@ -1128,8 +1287,43 @@ def build_review_time_detail(**kwargs):
 def build_pending_images_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(IMAGENES_PENDIENTES_CLEAN).to_parquet(
-        "/data/transito/pending_images_detail.parquet",
+    _prepare_for_publish(pd.read_parquet(IMAGENES_PENDIENTES_CLEAN)).to_parquet(
+        _output_path("pending_images_detail.parquet"),
+        index=False,
+    )
+
+
+def build_pending_images_history_detail(**kwargs):
+    import pandas as pd
+
+    seed = pd.read_parquet(HISTORIAL_PENDIENTES_CLEAN)
+    previous = _load_previous_published_parquet("pending_images_history_detail.parquet")
+    history = pd.concat([seed, previous], ignore_index=True).drop_duplicates()
+
+    current = pd.read_parquet(IMAGENES_PENDIENTES_CLEAN)[
+        ["Cliente", "tipo", "Estado", "Cantidad"]
+    ].drop_duplicates()
+    current_cmp = current.sort_values(["Cliente", "tipo", "Estado", "Cantidad"]).reset_index(drop=True)
+
+    append_snapshot = True
+    if not history.empty and "Tiempo" in history.columns:
+        history["Tiempo"] = pd.to_datetime(history["Tiempo"], errors="coerce")
+        last_time = history["Tiempo"].max()
+        last = history.loc[history["Tiempo"] == last_time, ["Cliente", "tipo", "Estado", "Cantidad"]]
+        last_cmp = last.sort_values(["Cliente", "tipo", "Estado", "Cantidad"]).reset_index(drop=True)
+        append_snapshot = not last_cmp.equals(current_cmp)
+
+    if append_snapshot:
+        now = pd.Timestamp.now(tz="America/Argentina/Buenos_Aires").tz_localize(None).floor("s")
+        snapshot = current.copy()
+        snapshot["Tiempo"] = now
+        history = pd.concat([history, snapshot], ignore_index=True)
+
+    history = history.drop_duplicates().sort_values(
+        ["Tiempo", "Cliente", "Estado", "tipo"]
+    )
+    _prepare_for_publish(history).to_parquet(
+        _output_path("pending_images_history_detail.parquet"),
         index=False,
     )
 
@@ -1137,17 +1331,8 @@ def build_pending_images_detail(**kwargs):
 def build_camera_reports_detail(**kwargs):
     import pandas as pd
 
-    pd.read_parquet(REPORTES_CAMARAS_CLEAN).to_parquet(
-        "/data/transito/camera_reports_detail.parquet",
-        index=False,
-    )
-
-
-def build_access_history_detail(**kwargs):
-    import pandas as pd
-
-    pd.read_parquet(HISTORIAL_ACCESOS_CLEAN).to_parquet(
-        "/data/transito/access_history_detail.parquet",
+    _prepare_for_publish(pd.read_parquet(REPORTES_CAMARAS_CLEAN)).to_parquet(
+        _output_path("camera_reports_detail.parquet"),
         index=False,
     )
 
@@ -1164,7 +1349,7 @@ def build_reviewer_hourly_detail(**kwargs):
         ["Mes", "Tipo de Cámara"],
         as_index=False,
     ).agg(**{"Promedio por hora del mes": ("Presunciones por hora", "mean")})
-    dataframe.merge(
+    hourly = dataframe.merge(
         daily_average,
         on=["Fecha", "Tipo de Cámara"],
         how="left",
@@ -1172,8 +1357,9 @@ def build_reviewer_hourly_detail(**kwargs):
         monthly_average,
         on=["Mes", "Tipo de Cámara"],
         how="left",
-    ).to_parquet(
-        "/data/transito/reviewer_hourly_detail.parquet",
+    )
+    _prepare_for_publish(hourly).to_parquet(
+        _output_path("reviewer_hourly_detail.parquet"),
         index=False,
     )
 
@@ -1198,14 +1384,14 @@ build_pending_images_detail_task = PythonOperator(
     python_callable=build_pending_images_detail,
     dag=transito_dag,
 )
+build_pending_images_history_detail_task = PythonOperator(
+    task_id="build_pending_images_history_detail",
+    python_callable=build_pending_images_history_detail,
+    dag=transito_dag,
+)
 build_camera_reports_detail_task = PythonOperator(
     task_id="build_camera_reports_detail",
     python_callable=build_camera_reports_detail,
-    dag=transito_dag,
-)
-build_access_history_detail_task = PythonOperator(
-    task_id="build_access_history_detail",
-    python_callable=build_access_history_detail,
     dag=transito_dag,
 )
 build_reviewer_hourly_detail_task = PythonOperator(
@@ -1218,6 +1404,34 @@ join_activity_uf_task >> build_activity_reviewers_detail_task
 transform_motivos_rechazos_task >> build_rejection_reasons_detail_task
 transform_tiempo_revision_task >> build_review_time_detail_task
 transform_imagenes_pendientes_task >> build_pending_images_detail_task
+[transform_imagenes_pendientes_task, transform_historial_pendientes_task] >> build_pending_images_history_detail_task
 transform_reportes_camaras_task >> build_camera_reports_detail_task
-transform_historial_accesos_task >> build_access_history_detail_task
 join_activity_review_time_task >> build_reviewer_hourly_detail_task
+
+# La consulta de metadata de Drive corta todo el DAG cuando no cambió ninguna fuente.
+check_tessa_sources_task >> [
+    fetch_actividad_revisores_task,
+    fetch_valores_uf_task,
+    fetch_motivos_rechazos_task,
+    fetch_tiempo_revision_task,
+    fetch_imagenes_pendientes_task,
+    fetch_historial_pendientes_task,
+    fetch_reportes_camaras_task,
+]
+
+publish_tessa_dataset_task = PythonOperator(
+    task_id="publish_tessa_dataset",
+    python_callable=publish_tessa_dataset,
+    dag=transito_dag,
+)
+
+[
+    build_activity_reviewers_detail_task,
+    build_rejection_reasons_detail_task,
+    build_review_time_detail_task,
+    build_pending_images_detail_task,
+    build_pending_images_history_detail_task,
+    build_camera_reports_detail_task,
+    build_reviewer_hourly_detail_task,
+] >> publish_tessa_dataset_task
+

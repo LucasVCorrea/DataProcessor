@@ -12,6 +12,183 @@ berisso_dag = DAG(
 )
 
 
+# ---- ranking de infractores -----------------------------------------------
+
+INFRACTORES_RANKING_DRIVE_FILE = "InfractoresRankingBERISSO.csv"
+INFRACTORES_RANKING_RAW = "/tmp/data/berisso/infractores_ranking.csv"
+INFRACTORES_RANKING_CLEAN = "/tmp/data/berisso/infractores_ranking_clean.parquet"
+INFRACTORES_RANKING_OUTPUT = "/data/berisso/infractores_ranking_detail.parquet"
+
+PERSONA_FISICA_PREFIJOS = {"20", "23", "24", "25", "26", "27"}
+PERSONA_JURIDICA_PREFIJOS = {"30", "33", "34"}
+
+
+def fetch_infractores_ranking(**kwargs):
+    from pathlib import Path
+
+    import requests
+    from oauth2client.service_account import ServiceAccountCredentials
+
+    credentials = ServiceAccountCredentials.from_json_keyfile_name(
+        "/credentials/credentials.json",
+        ["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    token = credentials.get_access_token().access_token
+    headers = {"Authorization": f"Bearer {token}"}
+
+    query = f"name = '{INFRACTORES_RANKING_DRIVE_FILE}' and trashed = false"
+    response = requests.get(
+        "https://www.googleapis.com/drive/v3/files",
+        headers=headers,
+        params={
+            "q": query,
+            "fields": "files(id,name,mimeType,modifiedTime)",
+            "orderBy": "modifiedTime desc",
+            "pageSize": 20,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    files = response.json().get("files", [])
+    if not files:
+        raise FileNotFoundError(
+            f"No se encontró {INFRACTORES_RANKING_DRIVE_FILE} en Google Drive."
+        )
+
+    source = files[0]
+    if source.get("mimeType") == "application/vnd.google-apps.spreadsheet":
+        download_url = (
+            "https://www.googleapis.com/drive/v3/files/"
+            f"{source['id']}/export"
+        )
+        download_params = {"mimeType": "text/csv"}
+    else:
+        download_url = (
+            "https://www.googleapis.com/drive/v3/files/"
+            f"{source['id']}"
+        )
+        download_params = {"alt": "media"}
+
+    download = requests.get(
+        download_url,
+        headers=headers,
+        params=download_params,
+        timeout=120,
+    )
+    download.raise_for_status()
+
+    destination = Path(INFRACTORES_RANKING_RAW)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(download.content)
+
+
+def transform_infractores_ranking(**kwargs):
+    import re
+    import unicodedata
+
+    import pandas as pd
+
+    try:
+        dataframe = pd.read_csv(
+            INFRACTORES_RANKING_RAW,
+            dtype="string",
+            sep=None,
+            engine="python",
+            encoding="utf-8-sig",
+        )
+    except UnicodeDecodeError:
+        dataframe = pd.read_csv(
+            INFRACTORES_RANKING_RAW,
+            dtype="string",
+            sep=None,
+            engine="python",
+            encoding="latin-1",
+        )
+
+    dataframe.columns = [str(column).strip() for column in dataframe.columns]
+
+    def normalize_header(value):
+        text = unicodedata.normalize("NFKD", str(value))
+        text = text.encode("ascii", "ignore").decode().lower()
+        return re.sub(r"[^a-z0-9]+", "", text)
+
+    normalized = {column: normalize_header(column) for column in dataframe.columns}
+    exact_names = {
+        "cuit",
+        "cuil",
+        "cuitcuil",
+        "cuilcuit",
+        "nrocuit",
+        "nrocuil",
+        "numerocuit",
+        "numerocuil",
+    }
+    candidates = [
+        column
+        for column, normalized_name in normalized.items()
+        if normalized_name in exact_names
+    ]
+    if not candidates:
+        candidates = [
+            column
+            for column, normalized_name in normalized.items()
+            if "cuit" in normalized_name or "cuil" in normalized_name
+        ]
+    if not candidates:
+        raise ValueError(
+            "InfractoresRankingBERISSO.csv no contiene una columna de CUIT/CUIL reconocible."
+        )
+
+    cuit_column = candidates[0]
+    cuit = (
+        dataframe[cuit_column]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+        .str.replace(r"\D", "", regex=True)
+    )
+    dataframe["CUIT"] = cuit
+
+    prefix = dataframe["CUIT"].str[:2]
+    dataframe["Tipo de Persona"] = "Sin clasificar"
+    dataframe.loc[prefix.isin(PERSONA_FISICA_PREFIJOS), "Tipo de Persona"] = (
+        "Persona física"
+    )
+    dataframe.loc[prefix.isin(PERSONA_JURIDICA_PREFIJOS), "Tipo de Persona"] = (
+        "Persona jurídica"
+    )
+
+    dataframe.to_parquet(INFRACTORES_RANKING_CLEAN, index=False)
+
+
+def build_infractores_ranking_detail(**kwargs):
+    import pandas as pd
+
+    dataframe = pd.read_parquet(INFRACTORES_RANKING_CLEAN)
+    dataframe.to_parquet(INFRACTORES_RANKING_OUTPUT, index=False)
+
+
+fetch_infractores_ranking_task = PythonOperator(
+    task_id="fetch_infractores_ranking",
+    python_callable=fetch_infractores_ranking,
+    dag=berisso_dag,
+)
+transform_infractores_ranking_task = PythonOperator(
+    task_id="transform_infractores_ranking",
+    python_callable=transform_infractores_ranking,
+    dag=berisso_dag,
+)
+build_infractores_ranking_detail_task = PythonOperator(
+    task_id="build_infractores_ranking_detail",
+    python_callable=build_infractores_ranking_detail,
+    dag=berisso_dag,
+)
+
+fetch_infractores_ranking_task >> transform_infractores_ranking_task
+transform_infractores_ranking_task >> build_infractores_ranking_detail_task
+
+
 # ---- actas pagadas ---------------------------------------------------------
 
 ACTAS_PAGADAS_RAW = "/tmp/data/berisso/actas_pagadas.parquet"

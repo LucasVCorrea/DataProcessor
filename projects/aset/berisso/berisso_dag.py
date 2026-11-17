@@ -25,6 +25,7 @@ SOURCE_FILES = [
     "Listado de actas notificadas email.csv",
     "Listado de actas notificadas.csv",
     "detalles_de_infracciones.csv",
+    "InfractoresRankingBERISSO.csv",
 ]
 
 PUBLISHED_FILES = [
@@ -58,6 +59,7 @@ PUBLISHED_FILES = [
     "payments_daily.parquet",
     "payments_detail.parquet",
     "payments_monthly.parquet",
+    "infractores_ranking_detail.parquet",
 ]
 
 
@@ -166,6 +168,118 @@ check_berisso_sources_task = ShortCircuitOperator(
     python_callable=check_berisso_sources,
     dag=berisso_dag,
 )
+
+
+
+# ---- ranking de infractores -----------------------------------------------
+
+INFRACTORES_RANKING_RAW = "/tmp/data/berisso/infractores_ranking_raw.parquet"
+INFRACTORES_RANKING_CLEAN = "/tmp/data/berisso/infractores_ranking_clean.parquet"
+
+PERSONA_FISICA_PREFIJOS = {"20", "23", "24", "25", "26", "27"}
+PERSONA_JURIDICA_PREFIJOS = {"30", "33", "34"}
+
+
+def fetch_infractores_ranking(**kwargs):
+    _fetch_csv(
+        "InfractoresRankingBERISSO.csv",
+        INFRACTORES_RANKING_RAW,
+        low_memory=False,
+        **kwargs,
+    )
+
+
+def transform_infractores_ranking(**kwargs):
+    import re
+
+    import pandas as pd
+
+    dataframe = pd.read_parquet(INFRACTORES_RANKING_RAW).copy()
+
+    def normalizar_nombre(value):
+        return str(value).strip().casefold().replace("_", " ")
+
+    cuit_column = next(
+        (
+            column
+            for column in dataframe.columns
+            if normalizar_nombre(column) in {"cuit", "cuil", "cuit cuil", "cuit/cuil"}
+        ),
+        None,
+    )
+    if cuit_column is None:
+        cuit_column = next(
+            (
+                column
+                for column in dataframe.columns
+                if "cuit" in normalizar_nombre(column)
+                or "cuil" in normalizar_nombre(column)
+            ),
+            None,
+        )
+
+    if cuit_column is None:
+        raise ValueError(
+            "InfractoresRankingBERISSO.csv no contiene una columna CUIT/CUIL reconocible"
+        )
+
+    def normalizar_cuit(value):
+        if pd.isna(value):
+            return ""
+        text = str(value).strip()
+        if text.endswith(".0"):
+            text = text[:-2]
+        return re.sub(r"\D", "", text)
+
+    dataframe["CUIT"] = dataframe[cuit_column].map(normalizar_cuit)
+
+    def tipo_persona(cuit):
+        prefix = str(cuit)[:2]
+        if prefix in PERSONA_FISICA_PREFIJOS:
+            return "Persona física"
+        if prefix in PERSONA_JURIDICA_PREFIJOS:
+            return "Persona jurídica"
+        return "Sin clasificar"
+
+    dataframe["Tipo de Persona"] = dataframe["CUIT"].map(tipo_persona)
+
+    ordered_columns = list(dataframe.columns)
+    ordered_columns.remove("Tipo de Persona")
+    cuit_index = ordered_columns.index("CUIT") if "CUIT" in ordered_columns else -1
+    ordered_columns.insert(cuit_index + 1, "Tipo de Persona")
+    dataframe = dataframe[ordered_columns]
+
+    dataframe.to_parquet(INFRACTORES_RANKING_CLEAN, index=False)
+
+
+def build_infractores_ranking_detail(**kwargs):
+    import pandas as pd
+
+    dataframe = pd.read_parquet(INFRACTORES_RANKING_CLEAN)
+    dataframe.to_parquet(
+        _output_path("infractores_ranking_detail.parquet"),
+        index=False,
+    )
+
+
+fetch_infractores_ranking_task = PythonOperator(
+    task_id="fetch_infractores_ranking",
+    python_callable=fetch_infractores_ranking,
+    dag=berisso_dag,
+)
+transform_infractores_ranking_task = PythonOperator(
+    task_id="transform_infractores_ranking",
+    python_callable=transform_infractores_ranking,
+    dag=berisso_dag,
+)
+build_infractores_ranking_detail_task = PythonOperator(
+    task_id="build_infractores_ranking_detail",
+    python_callable=build_infractores_ranking_detail,
+    dag=berisso_dag,
+)
+
+fetch_infractores_ranking_task >> transform_infractores_ranking_task
+transform_infractores_ranking_task >> build_infractores_ranking_detail_task
 
 
 # ---- actas pagadas ---------------------------------------------------------
@@ -1752,6 +1866,7 @@ check_berisso_sources_task >> [
     fetch_actas_notificadas_email_task,
     fetch_actividad_revisores_task,
     fetch_fallos_task,
+    fetch_infractores_ranking_task,
 ]
 
 
@@ -1791,5 +1906,6 @@ publish_berisso_dataset_task = PythonOperator(
     build_nivel5_daily_camera_task,
     build_nivel5_daily_result_task,
     build_nivel5_daily_metrics_task,
+    build_infractores_ranking_detail_task,
 ] >> publish_berisso_dataset_task
 

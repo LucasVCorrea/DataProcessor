@@ -1,3 +1,6 @@
+fetch_infractores_ranking > transform_infractores_ranking
+transform_infractores_ranking > build_infractores_ranking_detail
+check_berisso_sources > fetch_infractores_ranking
 fetch_actas_pagadas > transform_payments
 fetch_actas_notificadas > transform_notifications_door
 fetch_actas_notificadas_email > transform_notifications_email
